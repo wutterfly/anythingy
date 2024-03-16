@@ -15,10 +15,14 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Update
-      run: rustup update nightly && rustup default nightly && rustup +nightly component add miri
-    - name: Build
+      run: rustup update nightly && rustup +nightly component add miri
+    - name: Build stable
       run: cargo build --verbose && cargo build --release --verbose
-    - name: Run tests
+    - name: Build nightly
+      run: cargo +nightly build --verbose && cargo +nightly build --release --verbose
+    - name: Run tests stable
       run: cargo test --verbose
+    - name: Run tests nightly
+      run: cargo +nightly test --verbose
     - name: Run Miri
-      run: cargo miri test --verbose
+      run: cargo +nightly miri test --verbose
