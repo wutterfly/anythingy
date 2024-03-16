@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "map"
+harness = false
+
+[[bench]]
+name = "small_map"
+harness = false

@@ -1,21 +1,20 @@
-use std::{any::TypeId, collections::HashMap};
+use std::any::TypeId;
 
 use crate::{Thing, DEFAULT_THING_SIZE};
 
 /// A map for storing type erased values.
+/// For a small number of entries, using a `Vec` as underlying datastructure is more efficient.
 #[derive(Debug)]
-pub struct AnyMap<const SIZE: usize = DEFAULT_THING_SIZE> {
-    map: HashMap<TypeId, Thing<SIZE>>,
+pub struct SmallAnyMap<const SIZE: usize = DEFAULT_THING_SIZE> {
+    map: Vec<(TypeId, Thing<SIZE>)>,
 }
 
-impl<const SIZE: usize> AnyMap<SIZE> {
+impl<const SIZE: usize> SmallAnyMap<SIZE> {
     /// Creates a new `AnyMap`.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
+        Self { map: Vec::new() }
     }
 
     /// Creates an empty `AnyMap` with at least the specified capacity.
@@ -23,7 +22,7 @@ impl<const SIZE: usize> AnyMap<SIZE> {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: HashMap::with_capacity(capacity),
+            map: Vec::with_capacity(capacity),
         }
     }
 
@@ -47,44 +46,44 @@ impl<const SIZE: usize> AnyMap<SIZE> {
         self.map.clear()
     }
 
-    /// Returns the raw underlying `HashMap`.
+    /// Returns the raw underlying `Vec`.
     #[inline]
     #[must_use]
-    pub fn raw(self) -> HashMap<TypeId, Thing<SIZE>> {
+    pub fn raw(self) -> Vec<(TypeId, Thing<SIZE>)> {
         self.map
     }
 
-    /// Returns a reference to the raw underlying `HashMap`.
+    /// Returns a reference to the raw underlying `Vec`.
     #[inline]
     #[must_use]
-    pub const fn raw_ref(&self) -> &HashMap<TypeId, Thing<SIZE>> {
+    pub const fn raw_ref(&self) -> &Vec<(TypeId, Thing<SIZE>)> {
         &self.map
     }
 
-    /// Returns a mutable reference to the raw underlying `HashMap`.
+    /// Returns a mutable reference to the raw underlying `Vec`.
     #[inline]
     #[must_use]
-    pub fn raw_mut(&mut self) -> &mut HashMap<TypeId, Thing<SIZE>> {
+    pub fn raw_mut(&mut self) -> &mut Vec<(TypeId, Thing<SIZE>)> {
         &mut self.map
     }
 
     /// An iterator visiting all keys in arbitrary order.
     #[inline]
     pub fn keys(&self) -> impl std::iter::Iterator<Item = &TypeId> {
-        self.map.keys()
+        self.map.iter().map(|(k, _)| k)
     }
 
     /// An iterator visiting all values in arbitrary order.
     #[inline]
     pub fn values(&self) -> impl std::iter::Iterator<Item = &Thing<SIZE>> {
-        self.map.values()
+        self.map.iter().map(|(_, v)| v)
     }
 
     /// Returns true if the map contains a value for the specified key.
     #[inline]
     #[must_use]
     pub fn contains_key<T: 'static>(&self, key: &TypeId) -> bool {
-        self.map.contains_key(key)
+        self.map.iter().find(|(k, _)| k == key).is_some()
     }
 
     /// Shrinks the capacity of the map as much as possible.
@@ -102,42 +101,64 @@ impl<const SIZE: usize> AnyMap<SIZE> {
     pub fn insert<T: 'static>(&mut self, value: T) -> Option<T> {
         let id = TypeId::of::<T>();
         let thing = Thing::new(value);
-        self.map.insert(id, thing).map(Thing::get::<T>)
+
+        let found = self.map.iter_mut().find(|(k, _)| k == &id);
+
+        if let Some((_, v)) = found {
+            let out = std::mem::replace(v, thing);
+
+            Some(out.get::<T>())
+        } else {
+            self.map.push((id, thing));
+            None
+        }
     }
 
     /// Returns a reference to the value corresponding to the `TypeId` of `T`.
     #[inline]
     pub fn get<T: 'static>(&self) -> Option<&T> {
         let id = TypeId::of::<T>();
-        self.map.get(&id).map(Thing::get_ref::<T>)
+
+        self.map
+            .iter()
+            .find(|(k, _)| k == &id)
+            .map(|(_, v)| v.get_ref::<T>())
     }
 
     /// Returns a mutable reference to the value corresponding to the `TypeId` of `T`.
     #[inline]
     pub fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
         let id = TypeId::of::<T>();
-        self.map.get_mut(&id).map(Thing::get_mut::<T>)
+        self.map
+            .iter_mut()
+            .find(|(k, _)| k == &id)
+            .map(|(_, v)| v.get_mut::<T>())
     }
 
     /// Removes the value stored for `TypeId` of `T`, if the type was previously in the map.
     #[inline]
     pub fn remove<T: 'static>(&mut self) -> Option<T> {
         let id = TypeId::of::<T>();
-        self.map.remove(&id).map(Thing::get::<T>)
+        let position = self.map.iter().position(|(k, _)| k == &id);
+
+        if let Some(i) = position {
+            return Some(self.map.swap_remove(i).1.get::<T>());
+        }
+
+        None
     }
 }
 
-impl Default for AnyMap {
+impl Default for SmallAnyMap {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const SIZE: usize> std::iter::IntoIterator for AnyMap<SIZE> {
+impl<const SIZE: usize> std::iter::IntoIterator for SmallAnyMap<SIZE> {
     type Item = (TypeId, Thing<SIZE>);
-
-    type IntoIter = std::collections::hash_map::IntoIter<TypeId, Thing<SIZE>>;
+    type IntoIter = std::vec::IntoIter<(TypeId, Thing<SIZE>)>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -147,7 +168,7 @@ impl<const SIZE: usize> std::iter::IntoIterator for AnyMap<SIZE> {
 
 #[cfg(test)]
 mod tests_anymap {
-    use super::AnyMap as Map;
+    use super::SmallAnyMap as Map;
 
     #[test]
     fn test_anymap_insert() {
