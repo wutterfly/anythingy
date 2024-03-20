@@ -44,7 +44,7 @@ impl<const SIZE: usize> AnyMap<SIZE> {
     /// Removes all elements from map.
     #[inline]
     pub fn clear(&mut self) {
-        self.map.clear()
+        self.map.clear();
     }
 
     /// Returns the raw underlying `HashMap`.

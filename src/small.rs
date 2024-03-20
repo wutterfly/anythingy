@@ -13,7 +13,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     /// Creates a new `AnyMap`.
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { map: Vec::new() }
     }
 
@@ -43,7 +43,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     /// Removes all elements from map.
     #[inline]
     pub fn clear(&mut self) {
-        self.map.clear()
+        self.map.clear();
     }
 
     /// Returns the raw underlying `Vec`.
@@ -83,7 +83,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     #[inline]
     #[must_use]
     pub fn contains_key<T: 'static>(&self, key: &TypeId) -> bool {
-        self.map.iter().find(|(k, _)| k == key).is_some()
+        self.map.iter().any(|(k, _)| k == key)
     }
 
     /// Shrinks the capacity of the map as much as possible.
@@ -98,6 +98,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     ///
     /// If the map did have this key present, the value is updated, and the old value is returned.
     #[inline]
+    #[must_use]
     pub fn insert<T: 'static>(&mut self, value: T) -> Option<T> {
         let id = TypeId::of::<T>();
         let thing = Thing::new(value);
@@ -116,6 +117,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
 
     /// Returns a reference to the value corresponding to the `TypeId` of `T`.
     #[inline]
+    #[must_use]
     pub fn get<T: 'static>(&self) -> Option<&T> {
         let id = TypeId::of::<T>();
 
@@ -176,15 +178,15 @@ mod tests_anymap {
         assert!(map.is_empty());
 
         let data_1 = String::new();
-        map.insert(data_1);
+        let _ = map.insert(data_1);
         assert_eq!(map.len(), 1);
 
         let data_2: Vec<u8> = Vec::new();
-        map.insert(data_2);
+        let _ = map.insert(data_2);
         assert_eq!(map.len(), 2);
 
         let data_3 = 42u128;
-        map.insert(data_3);
+        let _ = map.insert(data_3);
         assert_eq!(map.len(), 3);
     }
 
@@ -193,13 +195,13 @@ mod tests_anymap {
         let mut map: Map = Map::with_capacity(3);
 
         let data_1 = String::new();
-        map.insert(data_1);
+        let _ = map.insert(data_1);
 
         let data_2: Vec<u8> = Vec::new();
-        map.insert(data_2);
+        let _ = map.insert(data_2);
 
         let data_3 = 42u128;
-        map.insert(data_3);
+        let _ = map.insert(data_3);
 
         let out_1 = map.get::<String>();
         assert!(out_1.is_some());
@@ -220,13 +222,13 @@ mod tests_anymap {
         let mut map: Map = Map::with_capacity(3);
 
         let data_1 = String::new();
-        map.insert(data_1);
+        let _ = map.insert(data_1);
 
         let data_2: Vec<u8> = Vec::new();
-        map.insert(data_2);
+        let _ = map.insert(data_2);
 
         let mut data_3 = 42u128;
-        map.insert(data_3);
+        let _ = map.insert(data_3);
 
         let out_1 = map.get_mut::<String>();
         assert!(out_1.is_some());
@@ -247,13 +249,13 @@ mod tests_anymap {
         let mut map: Map = Map::with_capacity(3);
 
         let data_1 = String::new();
-        map.insert(data_1);
+        let _ = map.insert(data_1);
 
         let data_2: Vec<u8> = Vec::new();
-        map.insert(data_2);
+        let _ = map.insert(data_2);
 
         let data_3 = 42u128;
-        map.insert(data_3);
+        let _ = map.insert(data_3);
 
         let out_1 = map.remove::<String>();
         assert!(out_1.is_some());

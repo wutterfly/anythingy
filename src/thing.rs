@@ -38,7 +38,7 @@ impl<const SIZE: usize> Thing<SIZE> {
 
         if Self::boxed::<T>() {
             // check that Thing can hold at least a Box.
-            assert!(std::mem::size_of::<Box<T>>() <= SIZE);
+            assert!(Self::fitting::<Box<T>>());
 
             // convert type from bytes
             let convert = Convert::new(Box::new(t));
@@ -76,18 +76,18 @@ impl<const SIZE: usize> Thing<SIZE> {
     #[inline]
     #[must_use]
     pub fn get<T: 'static>(mut self) -> T {
-        let id = TypeId::of::<T>();
-
         // check that types are matching
-        assert_eq!(id, self.id);
+        assert!(self.is_type::<T>());
 
         // IMPORTANT:
-        // markt this as NOT drop, even if it is
-        // this gets dropped at the end of the function call, while a valid instance of T also gets returned,
+        // markt self as NOT drop, even if it is
+        // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
 
         if Self::boxed::<T>() {
+            assert!(Self::fitting::<Box<T>>());
+
             // convert type from bytes
             let convert = Convert::<SIZE, Box<T>>::from_bytes(self.data);
 
@@ -108,19 +108,14 @@ impl<const SIZE: usize> Thing<SIZE> {
     #[inline]
     #[must_use]
     pub fn get_ref<T: 'static>(&self) -> &T {
-        let id = TypeId::of::<T>();
-
         // check that types are matching
-        assert_eq!(id, self.id);
+        assert!(self.is_type::<T>());
 
         if Self::boxed::<T>() {
-            let boxed: &Box<T> = unsafe { std::mem::transmute(&self.data) };
-
-            return boxed;
+            return Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref();
         }
 
-        let out = unsafe { std::mem::transmute(&self.data) };
-        out
+        Convert::<SIZE, T>::get_ref(&self.data)
     }
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
@@ -130,20 +125,14 @@ impl<const SIZE: usize> Thing<SIZE> {
     #[inline]
     #[must_use]
     pub fn get_mut<T: 'static>(&mut self) -> &mut T {
-        let id = TypeId::of::<T>();
-
         // check that types are matching
-        assert_eq!(id, self.id);
+        assert!(self.is_type::<T>());
 
         if Self::boxed::<T>() {
-            let boxed: &mut Box<T> = unsafe { std::mem::transmute(&mut self.data) };
-
-            return boxed;
+            return Convert::<SIZE, Box<T>>::get_mut(&mut self.data).as_mut();
         }
 
-        let out: &mut T = unsafe { std::mem::transmute(&mut self.data) };
-
-        out
+        Convert::<SIZE, T>::get_mut(&mut self.data)
     }
 
     /// Returns the original type of `Thing`, if given type and original type match.
@@ -157,8 +146,8 @@ impl<const SIZE: usize> Thing<SIZE> {
         }
 
         // IMPORTANT:
-        // markt this as NOT drop, even if it is
-        // this gets dropped at the end of the function call, while a valid instance of T also gets returned,
+        // markt self as NOT drop, even if it is
+        // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
 
@@ -187,13 +176,10 @@ impl<const SIZE: usize> Thing<SIZE> {
         }
 
         if Self::boxed::<T>() {
-            let boxed: &Box<T> = unsafe { std::mem::transmute(&self.data) };
-
-            return Some(boxed);
+            return Some(Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref());
         }
 
-        let out = unsafe { std::mem::transmute(&self.data) };
-        Some(out)
+        Some(Convert::<SIZE, T>::get_ref(&self.data))
     }
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
@@ -207,14 +193,10 @@ impl<const SIZE: usize> Thing<SIZE> {
         }
 
         if Self::boxed::<T>() {
-            let boxed: &mut Box<T> = unsafe { std::mem::transmute(&mut self.data) };
-
-            return Some(boxed);
+            return Some(Convert::<SIZE, Box<T>>::get_mut(&mut self.data).as_mut());
         }
 
-        let out: &mut T = unsafe { std::mem::transmute(&mut self.data) };
-
-        Some(out)
+        Some(Convert::<SIZE, T>::get_mut(&mut self.data))
     }
 
     /// Returns true, if erased type is equal to given type.
@@ -224,11 +206,65 @@ impl<const SIZE: usize> Thing<SIZE> {
         self.id == TypeId::of::<T>()
     }
 
+    /// Returns true, if `T` can be made into a `Thing`.
+    ///
+    /// Returns false, if `SIZE` is smaller then a needed `Box<T>`.
     #[inline]
-    const fn boxed<T: 'static>() -> bool {
+    #[must_use]
+    pub const fn fitting<T: 'static>() -> bool {
+        Self::size_requirement::<T>() <= SIZE
+    }
+
+    /// Returns the minimum required `SIZE`, to fit `T` into a `Thing`.
+    ///
+    /// This function does not differentiate if `T` has to be boxed or not.
+    /// For minimum size requirement while `T` can remain unboxed, see `size_requirement_unboxed`.
+    #[inline]
+    #[must_use]
+    pub const fn size_requirement<T: 'static>() -> usize {
+        let size = std::mem::size_of::<T>();
+        let boxed = std::mem::size_of::<Box<T>>();
         let align = std::mem::align_of::<T>();
 
-        std::mem::size_of::<T>() > SIZE || align > 8
+        // value always has to be boxed if align is greate then 8
+        if align > 8 {
+            return boxed;
+        }
+
+        if size > SIZE && size > boxed {
+            return boxed;
+        }
+
+        size
+    }
+
+    /// Returns the minimum required `SIZE`, to fit `T` into a `Thing` while `T` can remain unboxed.
+    /// If `T` has to be boxed, return `None`.
+    #[inline]
+    #[must_use]
+    pub const fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
+        let size = std::mem::size_of::<T>();
+        let align = std::mem::align_of::<T>();
+
+        // value always has to be boxed if align is greate then 8
+        if align > 8 {
+            return None;
+        }
+
+        Some(size)
+    }
+
+    /// Returns true, if `T` has to be boxed to be made into a `Thing`.
+    ///
+    /// Returns false, if `SIZE` is smaller then size of `T` or alignment of `T` is greate then 8.
+    #[inline]
+    #[must_use]
+    pub const fn boxed<T: 'static>() -> bool {
+        if let Some(size) = Self::size_requirement_unboxed::<T>() {
+            size > SIZE
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -275,7 +311,7 @@ union Convert<const SIZE: usize, T> {
 
 impl<const SIZE: usize, T> Convert<SIZE, T> {
     #[inline]
-    pub const fn new(value: T) -> Self {
+    const fn new(value: T) -> Self {
         let size = core::mem::size_of::<T>();
 
         assert!(size <= SIZE);
@@ -286,22 +322,38 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
     }
 
     #[inline]
-    pub const fn bytes(self) -> [MaybeUninit<u8>; SIZE] {
+    const fn bytes(self) -> [MaybeUninit<u8>; SIZE] {
         // SAFETY:
         // This is safe, because Convert can only be constructed correctly.
         unsafe { self.bytes }
     }
 
     #[inline]
-    pub const fn from_bytes(bytes: [MaybeUninit<u8>; SIZE]) -> Self {
+    const fn from_bytes(bytes: [MaybeUninit<u8>; SIZE]) -> Self {
         Self { bytes }
     }
 
     #[inline]
-    pub const fn get(self) -> T {
+    const fn get(self) -> T {
         // SAFETY:
         // This is safe, because we guaranteed at creation of this Convert, that the type is correct.
         ManuallyDrop::into_inner(unsafe { self.data })
+    }
+
+    #[inline]
+    const fn get_ref(data: &[MaybeUninit<u8>; SIZE]) -> &T {
+        let bytes = std::ptr::from_ref::<[std::mem::MaybeUninit<u8>; SIZE]>(data);
+        let ptr = bytes.cast::<T>();
+
+        unsafe { &*ptr }
+    }
+
+    #[inline]
+    fn get_mut(data: &mut [MaybeUninit<u8>; SIZE]) -> &mut T {
+        let bytes = std::ptr::from_mut::<[std::mem::MaybeUninit<u8>; SIZE]>(data);
+        let ptr = bytes.cast::<T>();
+
+        unsafe { &mut *ptr }
     }
 }
 
@@ -326,6 +378,18 @@ impl<const SIZE: usize, T> std::fmt::Debug for Convert<SIZE, T> {
 mod tests_thing {
 
     use crate::Thing;
+
+    #[test]
+    fn test_fitting() {
+        let fitting = Thing::<1>::fitting::<u8>();
+        assert!(fitting);
+
+        let fitting = Thing::<1>::fitting::<u16>();
+        assert!(!fitting);
+
+        let fitting = Thing::<2>::fitting::<u16>();
+        assert!(fitting);
+    }
 
     #[test]
     fn test_thing_new_unboxed() {
