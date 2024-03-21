@@ -17,12 +17,12 @@ jobs:
     - name: Update
       run: rustup update nightly && rustup +nightly component add miri
     - name: Build stable
-      run: cargo build --verbose && cargo build --release --verbose
+      run: cargo build && cargo build --release
     - name: Build nightly
-      run: cargo +nightly build --verbose && cargo +nightly build --release --verbose
+      run: cargo +nightly build && cargo +nightly build --release
     - name: Run tests stable
-      run: cargo test --verbose
+      run: cargo test && cargo test --release
     - name: Run tests nightly
-      run: cargo +nightly test --verbose
+      run: cargo +nightly test && cargo +nightly test --release
     - name: Run Miri
-      run: cargo +nightly miri test --verbose
+      run: cargo +nightly miri test

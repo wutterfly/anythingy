@@ -1,5 +1,7 @@
 # Anything
 
+[![Rust](https://github.com/wutterfly/anything/actions/workflows/rust.yml/badge.svg)](https://github.com/wutterfly/anything/actions/workflows/rust.yml)
+
 **This is a work-in-progess project and not for production use.**
 
 A library for dynamic typing. It's main feature is the *Thing* type, that works similar to *Box\<dyn Any\>*, but can be sized at compile time while falling back to boxing the value, if it's too big.
