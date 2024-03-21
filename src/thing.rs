@@ -3,7 +3,7 @@ use std::{
     mem::{ManuallyDrop, MaybeUninit},
 };
 
-/// Default size of [`crate::Thing`].
+/// Default size of [`Thing`][crate::Thing].
 /// Choosen to be 3x [`std::mem::size_of<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
 pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 
@@ -33,7 +33,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// let sting_thing: Thing<24> = Thing::new(String::new());
@@ -86,7 +86,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.get::<u64>();
@@ -128,7 +128,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.get_ref::<u64>();
@@ -155,7 +155,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let mut number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.get_mut::<u64>();
@@ -184,7 +184,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.try_get::<u64>();
@@ -224,7 +224,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.try_get_ref::<u64>();
@@ -251,7 +251,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let mut number_thing: Thing<24> = Thing::new(42u64);
     /// let number = number_thing.try_get_mut::<u64>();
@@ -277,7 +277,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// let number_thing: Thing<24> = Thing::new(42u64);
     /// assert!(number_thing.is_type::<u64>());
@@ -295,7 +295,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// // fitting
     /// assert!(Thing::<1>::fitting::<u8>());
@@ -339,7 +339,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// // not boxed
     /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u8>(), Some(1));
@@ -373,7 +373,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Example
     /// ```rust
-    /// # use anything::{Thing};
+    /// # use anythingy::{Thing};
     /// # fn main() {
     /// // not boxed
     /// assert!(!Thing::<2>::boxed::<u8>());

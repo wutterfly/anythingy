@@ -7,12 +7,12 @@
 //! It's main feature is the [`Thing`] type, that works similar to [`Box<dyn Any>`][std::any::Any], but can be sized at compile time.
 //! Additonal type maps for storing objects of different types are provided:
 //!
-//! * [`crate::AnyMap`] using a [`HashMap<TypeId, Thing>`][std::collections::hash_map::HashMap] for storing a large number of different types.
-//! * [`crate::SmallAnyMap`] using a [`Vec<(std::any::TypeId, anything::Thing)>`][Vec] for storing a small number of different types.
+//! * [`AnyMap`] using a [`HashMap`][std::collections::hash_map::HashMap] for storing a large number of different types.
+//! * [`SmallAnyMap`] using a [`Vec`] for storing a small number of different types.
 //!
 //! # Example
 //! ```rust
-//! # use anything::Thing;
+//! # use anythingy::Thing;
 //! # fn main() {
 //!    let number_thing: Thing<24> = Thing::new(42u64);
 //!    let sting_thing: Thing<24> = Thing::new(String::from("Hello there"));

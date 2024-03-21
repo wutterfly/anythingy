@@ -1,6 +1,6 @@
 mod bench;
 
-use anything::AnyMap;
+use anythingy::AnyMap;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 type Map = AnyMap;
