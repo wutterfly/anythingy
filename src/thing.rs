@@ -336,9 +336,26 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns the minimum required `SIZE`, to fit `T` into a `Thing` while `T` can remain unboxed.
     /// If `T` has to be boxed, return `None`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// // not boxed
+    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u8>(), Some(1));
+    /// // not boxed
+    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u16>(),Some(2));
+    /// // boxed
+    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u32>(), Some(4));
+    /// // not boxed
+    /// assert_eq!(Thing::<100>::size_requirement_unboxed::<u64>(),Some(8));
+    /// // boxed (maybe, TODO: fix this once alignment change hit stable)
+    /// assert!(Thing::<8>::size_requirement_unboxed::<u128>().is_none() == (std::mem::align_of::<u128>() > 8));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
-    pub const fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
+    pub fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
@@ -372,7 +389,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// ```
     #[inline]
     #[must_use]
-    pub const fn boxed<T: 'static>() -> bool {
+    pub fn boxed<T: 'static>() -> bool {
         if let Some(size) = Self::size_requirement_unboxed::<T>() {
             size > SIZE
         } else {
