@@ -3,8 +3,9 @@
 //!
 //! A library for dynamic typing.
 //!
+//!
 //! It's main feature is the [`Thing`] type, that works similar to [`Box<dyn Any>`][std::any::Any], but can be sized at compile time.
-//! Additonal 'TypeMaps' for storing objects of different types are provided:
+//! Additonal type maps for storing objects of different types are provided:
 //!
 //! * [`crate::AnyMap`] using a [`HashMap<TypeId, Thing>`][std::collections::hash_map::HashMap] for storing a large number of different types.
 //! * [`crate::SmallAnyMap`] using a [`Vec<(std::any::TypeId, anything::Thing)>`][Vec] for storing a small number of different types.

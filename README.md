@@ -4,6 +4,8 @@
 
 **This is a work-in-progess project and not for production use.**
 
+*Thingy: a [..] thing whose name one has forgotten, does not know, or does not wish to mention.* [from Oxford Languages]
+
 A library for dynamic typing. It's main feature is the *Thing* type, that works similar to *Box\<dyn Any\>*, but can be sized at compile time while falling back to boxing the value, if it's too big.
 
 

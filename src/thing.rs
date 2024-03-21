@@ -355,7 +355,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
+    pub const fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
@@ -389,7 +389,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// ```
     #[inline]
     #[must_use]
-    pub fn boxed<T: 'static>() -> bool {
+    pub const fn boxed<T: 'static>() -> bool {
         if let Some(size) = Self::size_requirement_unboxed::<T>() {
             size > SIZE
         } else {
