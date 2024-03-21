@@ -1,4 +1,4 @@
-# Anything
+# Anythingy
 
 [![Rust](https://github.com/wutterfly/anything/actions/workflows/rust.yml/badge.svg)](https://github.com/wutterfly/anything/actions/workflows/rust.yml)
 

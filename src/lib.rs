@@ -1,4 +1,4 @@
-//! # Anything
+//! # Anythingy
 //! **This is a work-in-progess project and not for production use.**
 //!
 //! A library for dynamic typing.
