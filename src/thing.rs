@@ -384,7 +384,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// // not boxed
     /// assert!(!Thing::<100>::boxed::<u64>());
     /// // boxed
-    /// assert!(Thing::<100>::boxed::<u128>());
+    /// assert!(Thing::<100>::boxed::<u128>()== (std::mem::align_of::<u128>() > 8));
     /// # }
     /// ```
     #[inline]
