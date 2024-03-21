@@ -3,7 +3,7 @@ use std::any::TypeId;
 use crate::{Thing, DEFAULT_THING_SIZE};
 
 /// A map for storing type erased values.
-/// For a small number of entries, using a `Vec` as underlying datastructure is more efficient.
+/// For a small number of entries, using a [`Vec`] as underlying datastructure is more efficient.
 #[derive(Debug)]
 pub struct SmallAnyMap<const SIZE: usize = DEFAULT_THING_SIZE> {
     map: Vec<(TypeId, Thing<SIZE>)>,

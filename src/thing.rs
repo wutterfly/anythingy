@@ -3,11 +3,11 @@ use std::{
     mem::{ManuallyDrop, MaybeUninit},
 };
 
-/// Default size of `Thing`.
-/// Choosen to be 3x the size of usize, to facilitate Vec/String without boxing them, to prevent double pointers.
+/// Default size of [`crate::Thing`].
+/// Choosen to be 3x [`std::mem::size_of<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
 pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 
-/// A Structure for storing type-erased values. Similar to `Box<dyn Any>` it can store values of any type.
+/// A Structure for storing type-erased values. Similar to [`Box<dyn Any>`][std::any::Any] it can store values of any type.
 ///
 /// What makes this structure special is, that the `SIZE` of Thing can be specified.
 /// For values of type `T`, where size of `T` is smaller/equal to `SIZE`, no additional allocation is needed.
@@ -30,6 +30,16 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics, if size of `T` is greate then `SIZE`, but `SIZE` is smaller then size of `Box<T>`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// let sting_thing: Thing<24> = Thing::new(String::new());
+    /// let byte_thing: Thing<24> = Thing::new(Vec::<u8>::new());
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn new<T: 'static>(t: T) -> Self {
@@ -73,6 +83,16 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.get::<u64>();
+    /// assert_eq!(number, 42);
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn get<T: 'static>(mut self) -> T {
@@ -105,6 +125,16 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.get_ref::<u64>();
+    /// assert_eq!(number, &42);
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn get_ref<T: 'static>(&self) -> &T {
@@ -122,6 +152,20 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let mut number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.get_mut::<u64>();
+    /// assert_eq!(number, &mut 42);
+    /// *number = 123;
+    ///
+    /// let number = number_thing.get_mut::<u64>();
+    /// assert_eq!(number, &mut 123);
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn get_mut<T: 'static>(&mut self) -> &mut T {
@@ -137,6 +181,16 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.try_get::<u64>();
+    /// assert_eq!(number, Some(42));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn try_get<T: 'static>(mut self) -> Option<T> {
@@ -167,6 +221,16 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns a reference to the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.try_get_ref::<u64>();
+    /// assert_eq!(number, Some(&42));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn try_get_ref<T: 'static>(&self) -> Option<&T> {
@@ -184,6 +248,16 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let mut number_thing: Thing<24> = Thing::new(42u64);
+    /// let number = number_thing.try_get_mut::<u64>();
+    /// assert_eq!(number, Some(&mut 42));
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn try_get_mut<T: 'static>(&mut self) -> Option<&mut T> {
@@ -200,6 +274,15 @@ impl<const SIZE: usize> Thing<SIZE> {
     }
 
     /// Returns true, if erased type is equal to given type.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// let number_thing: Thing<24> = Thing::new(42u64);
+    /// assert!(number_thing.is_type::<u64>());
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_type<T: 'static>(&self) -> bool {
@@ -209,6 +292,23 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// Returns true, if `T` can be made into a `Thing`.
     ///
     /// Returns false, if `SIZE` is smaller then a needed `Box<T>`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// // fitting
+    /// assert!(Thing::<1>::fitting::<u8>());
+    /// // not fitting
+    /// assert!(!Thing::<1>::fitting::<u16>());
+    /// // fitting
+    /// assert!(Thing::<2>::fitting::<u16>());
+    /// // fitting, but boxed
+    /// assert!(Thing::<16>::fitting::<String>());
+    /// // fitting
+    /// assert!(Thing::<24>::fitting::<String>());
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub const fn fitting<T: 'static>() -> bool {
@@ -227,11 +327,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         let align = std::mem::align_of::<T>();
 
         // value always has to be boxed if align is greate then 8
-        if align > 8 {
-            return boxed;
-        }
-
-        if size > SIZE && size > boxed {
+        if align > 8 || size > boxed {
             return boxed;
         }
 
@@ -257,6 +353,23 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// Returns true, if `T` has to be boxed to be made into a `Thing`.
     ///
     /// Returns false, if `SIZE` is smaller then size of `T` or alignment of `T` is greate then 8.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use anything::{Thing};
+    /// # fn main() {
+    /// // not boxed
+    /// assert!(!Thing::<2>::boxed::<u8>());
+    /// // not boxed
+    /// assert!(!Thing::<2>::boxed::<u16>());
+    /// // boxed
+    /// assert!(Thing::<2>::boxed::<u32>());
+    /// // not boxed
+    /// assert!(!Thing::<100>::boxed::<u64>());
+    /// // boxed
+    /// assert!(Thing::<100>::boxed::<u128>());
+    /// # }
+    /// ```
     #[inline]
     #[must_use]
     pub const fn boxed<T: 'static>() -> bool {
