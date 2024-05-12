@@ -80,11 +80,12 @@ impl<const SIZE: usize> AnyMap<SIZE> {
         self.map.values()
     }
 
-    /// Returns true if the map contains a value for the specified key.
+    /// Returns true if the map contains a value for the associated type.
     #[inline]
     #[must_use]
-    pub fn contains_key<T: 'static>(&self, key: &TypeId) -> bool {
-        self.map.contains_key(key)
+    pub fn contains_key<T: 'static>(&self) -> bool {
+        let id = std::any::TypeId::of::<T>();
+        self.map.contains_key(&id)
     }
 
     /// Shrinks the capacity of the map as much as possible.
