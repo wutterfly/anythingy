@@ -16,13 +16,13 @@ A library for dynamic typing. It's main feature is the *Thing* type, that works 
 use anything::Thing;
 fn main() {
     let number_thing: Thing<24> = Thing::new(42u64);
-    let sting_thing: Thing<24> = Thing::new(String::from("Hello there"));
+    let string_thing: Thing<24> = Thing::new(String::from("Hello there"));
     let bytes_thing: Thing<24> = Thing::new(Vec::from(b"so uncivilized"));
 
     let number = number_thing.get::<u64>();
     assert_eq!(number, 42);
 
-    let string = sting_thing.get::<String>();
+    let string = string_thing.get::<String>();
     assert_eq!(&string, "Hello there");
 
     let bytes = bytes_thing.get::<Vec<u8>>();
