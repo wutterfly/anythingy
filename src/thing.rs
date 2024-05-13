@@ -1,5 +1,6 @@
 use std::{
     any::TypeId,
+    cell::UnsafeCell,
     mem::{ManuallyDrop, MaybeUninit},
 };
 
@@ -19,8 +20,8 @@ pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 #[repr(align(8))]
 pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
     id: TypeId,
-    drop: fn([MaybeUninit<u8>; SIZE]),
-    data: [MaybeUninit<u8>; SIZE],
+    drop: fn(UnsafeCell<[MaybeUninit<u8>; SIZE]>),
+    data: UnsafeCell<[MaybeUninit<u8>; SIZE]>,
 }
 
 impl<const SIZE: usize> Thing<SIZE> {
@@ -105,18 +106,20 @@ impl<const SIZE: usize> Thing<SIZE> {
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
 
+        let data = unsafe { self.move_data_uninit() };
+
         if Self::boxed::<T>() {
             assert!(Self::fitting::<Box<T>>());
 
             // convert type from bytes
-            let convert = Convert::<SIZE, Box<T>>::from_bytes(self.data);
+            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
 
             // move value out of box
             return *convert.get();
         }
 
         // convert type from bytes
-        let convert = Convert::<SIZE, T>::from_bytes(self.data);
+        let convert = Convert::<SIZE, T>::from_bytes(data);
 
         convert.get()
     }
@@ -205,16 +208,18 @@ impl<const SIZE: usize> Thing<SIZE> {
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
 
+        let data = unsafe { self.move_data_uninit() };
+
         if Self::boxed::<T>() {
             // convert type from bytes
-            let convert = Convert::<SIZE, Box<T>>::from_bytes(self.data);
+            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
 
             // move value out of box
             return Some(*convert.get());
         }
 
         // convert type from bytes
-        let convert = Convert::<SIZE, T>::from_bytes(self.data);
+        let convert = Convert::<SIZE, T>::from_bytes(data);
 
         Some(convert.get())
     }
@@ -397,8 +402,15 @@ impl<const SIZE: usize> Thing<SIZE> {
         }
     }
 
+    /// This is unsafe, because it leaves self.data in an invalid state,
+    unsafe fn move_data_uninit(&mut self) -> UnsafeCell<[MaybeUninit<u8>; SIZE]> {
+        let fill = UnsafeCell::new([MaybeUninit::<u8>::uninit(); SIZE]);
+
+        std::mem::replace(&mut self.data, fill)
+    }
+
     #[inline]
-    fn drop_glue<T: 'static>(data: [MaybeUninit<u8>; SIZE]) {
+    fn drop_glue<T: 'static>(data: UnsafeCell<[MaybeUninit<u8>; SIZE]>) {
         if Self::boxed::<T>() {
             // convert type from bytes
             let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
@@ -421,13 +433,15 @@ impl<const SIZE: usize> Thing<SIZE> {
     }
 
     #[inline]
-    const fn empty_drop_glue<const S: usize>(_: [MaybeUninit<u8>; S]) {}
+    const fn empty_drop_glue<const S: usize>(_: UnsafeCell<[MaybeUninit<u8>; S]>) {}
 }
 
 impl<const SIZE: usize> std::ops::Drop for Thing<SIZE> {
     #[inline]
     fn drop(&mut self) {
-        (self.drop)(self.data);
+        let drop = unsafe { self.move_data_uninit() };
+
+        (self.drop)(drop);
     }
 }
 
@@ -435,8 +449,8 @@ impl<const SIZE: usize> std::ops::Drop for Thing<SIZE> {
 /// `std::mem::transmute` can only convert between types of equal size.
 #[repr(align(8))]
 union Convert<const SIZE: usize, T> {
-    bytes: [MaybeUninit<u8>; SIZE],
-    data: ManuallyDrop<T>,
+    bytes: ManuallyDrop<UnsafeCell<[MaybeUninit<u8>; SIZE]>>,
+    data: ManuallyDrop<UnsafeCell<T>>,
 }
 
 impl<const SIZE: usize, T> Convert<SIZE, T> {
@@ -447,65 +461,63 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
         assert!(size <= SIZE);
 
         Self {
-            data: ManuallyDrop::new(value),
+            data: ManuallyDrop::new(UnsafeCell::new(value)),
         }
     }
 
     #[inline]
-    const fn bytes(self) -> [MaybeUninit<u8>; SIZE] {
+    const fn bytes(self) -> UnsafeCell<[MaybeUninit<u8>; SIZE]> {
         // SAFETY:
         // This is safe, because Convert can only be constructed correctly.
-        unsafe { self.bytes }
+        ManuallyDrop::into_inner(unsafe { self.bytes })
     }
 
     #[inline]
-    const fn from_bytes(bytes: [MaybeUninit<u8>; SIZE]) -> Self {
-        Self { bytes }
+    const fn from_bytes(bytes: UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> Self {
+        Self {
+            bytes: ManuallyDrop::new(bytes),
+        }
     }
 
     #[inline]
-    const fn get(self) -> T {
+    fn get(self) -> T {
         // SAFETY:
         // This is safe, because we guaranteed at creation of this Convert, that the type is correct.
-        ManuallyDrop::into_inner(unsafe { self.data })
+        ManuallyDrop::into_inner(unsafe { self.data }).into_inner()
     }
 
     #[inline]
-    const fn get_ref(data: &[MaybeUninit<u8>; SIZE]) -> &T {
-        let bytes = std::ptr::from_ref::<[std::mem::MaybeUninit<u8>; SIZE]>(data);
+    const fn get_ref(data: &UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> &T {
+        let bytes = std::ptr::from_ref::<UnsafeCell<[std::mem::MaybeUninit<u8>; SIZE]>>(data);
         let ptr = bytes.cast::<T>();
 
         unsafe { &*ptr }
     }
 
     #[inline]
-    fn get_mut(data: &mut [MaybeUninit<u8>; SIZE]) -> &mut T {
-        let bytes = std::ptr::from_mut::<[std::mem::MaybeUninit<u8>; SIZE]>(data);
+    fn get_mut(data: &mut UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> &mut T {
+        let bytes = std::ptr::from_mut::<UnsafeCell<[std::mem::MaybeUninit<u8>; SIZE]>>(data);
         let ptr = bytes.cast::<T>();
 
         unsafe { &mut *ptr }
     }
 }
 
-impl<const SIZE: usize, T: Copy> Clone for Convert<SIZE, T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<const SIZE: usize, T: Copy> Copy for Convert<SIZE, T> {}
-
 impl<const SIZE: usize, T> std::fmt::Debug for Convert<SIZE, T> {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = std::any::type_name::<T>();
-        write!(f, "{name}: {:?}", unsafe { self.bytes })
+
+        let bytes = unsafe { &*(self.bytes.get() as *const _) };
+
+        write!(f, "{name}: {:?}", bytes)
     }
 }
 
 #[cfg(test)]
 mod tests_thing {
+
+    use std::sync::RwLock;
 
     use crate::Thing;
 
@@ -634,5 +646,29 @@ mod tests_thing {
 
         let out_1 = thing.get_ref::<TestAlign>();
         assert_eq!(&data_1, out_1)
+    }
+
+    #[test]
+    fn test_get_ref_with_unsafecell() {
+        /// Using types that contain interior mutability was problematic.
+        ///
+        /// De-referencing a *const T to a &T, where T contains (somewhere) a UnsafeCell, is UB.
+        /// A shared reference (&T) points to immutable memory, allowing certain optimizations. UnsafeCell disables this.
+        /// Because Thing is a generic type, it can't be ruled out that the stored type contains a UnsafeCell.
+        /// The prevent UB upfront, internal data is always wrapped in an UnsafeCell.
+        ///
+        /// Miri Error:
+        /// trying to retag from <205684> for SharedReadWrite permission at [..], but that tag only grants SharedReadOnly permission for this location
+        struct Test {
+            _lock: RwLock<u32>,
+        }
+
+        let data_1 = Test {
+            _lock: RwLock::new(42),
+        };
+
+        let thing_1: Thing = Thing::new(data_1);
+        let data_1_out = thing_1.get_ref::<Test>();
+        assert_eq!(*data_1_out._lock.read().unwrap(), 42);
     }
 }
