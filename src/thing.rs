@@ -15,7 +15,33 @@ pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 ///
 /// For types `T` that are greater then `SIZE`, the value gets boxed.
 ///
-/// For types `T` wich alignment is greate then 8, the value gets also boxed.
+/// For types `T` wich alignment is greater then 8, the value gets also boxed.
+///
+/// # Send, Sync, UnwindSafe, RefUnwindSafe
+/// Because the type of the contained thing is erased, no assumption can be made, whether the contained thing implements any of the marker traits.
+/// Here it is advised, to create a wrapper type, that checks at creation for required traits.
+///
+/// ## Example
+/// ```rust
+/// # use anythingy::{Thing};
+/// # use std::panic::{RefUnwindSafe, UnwindSafe};
+/// struct Wrapper(Thing);
+///
+/// impl RefUnwindSafe for Wrapper {}
+/// impl UnwindSafe for Wrapper {}
+/// // SAFETY: Trait bounds get checked at creation.
+/// unsafe impl Sync for Wrapper {}
+/// unsafe impl Send for Wrapper {}
+///
+/// impl Wrapper {
+///     pub fn new<T>(value: T) -> Self
+///     where
+///         T: Send + Sync + UnwindSafe + RefUnwindSafe + 'static
+///     {
+///         Self(Thing::new(value))
+///     }
+/// }
+/// ```
 #[derive(Debug)]
 #[repr(align(8))]
 pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
