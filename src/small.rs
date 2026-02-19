@@ -1,6 +1,6 @@
 use std::any::TypeId;
 
-use crate::{Thing, DEFAULT_THING_SIZE};
+use crate::{DEFAULT_THING_SIZE, Thing};
 
 /// A map for storing type erased values.
 /// For a small number of entries, using a [`Vec`] as underlying data structure is more efficient.
@@ -29,14 +29,14 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     /// Returns the number of elements in the `AnyMap`.
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.map.len()
     }
 
     /// Returns true if the map contains no elements.
     #[inline]
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
@@ -63,7 +63,7 @@ impl<const SIZE: usize> SmallAnyMap<SIZE> {
     /// Returns a mutable reference to the raw underlying `Vec`.
     #[inline]
     #[must_use]
-    pub fn raw_mut(&mut self) -> &mut Vec<(TypeId, Thing<SIZE>)> {
+    pub const fn raw_mut(&mut self) -> &mut Vec<(TypeId, Thing<SIZE>)> {
         &mut self.map
     }
 
@@ -169,105 +169,245 @@ impl<const SIZE: usize> std::iter::IntoIterator for SmallAnyMap<SIZE> {
 }
 
 #[cfg(test)]
-mod tests_anymap {
+mod tests {
     use super::SmallAnyMap as Map;
 
-    #[test]
-    fn test_anymap_insert() {
-        let mut map: Map = Map::with_capacity(3);
-        assert!(map.is_empty());
+    mod construction {
+        use super::Map;
 
-        let data_1 = String::new();
-        let _ = map.insert(data_1);
-        assert_eq!(map.len(), 1);
+        #[test]
+        fn new_is_empty() {
+            let map: Map = Map::new();
+            assert!(map.is_empty());
+            assert_eq!(map.len(), 0);
+        }
 
-        let data_2: Vec<u8> = Vec::new();
-        let _ = map.insert(data_2);
-        assert_eq!(map.len(), 2);
+        #[test]
+        fn default_is_empty() {
+            let map: Map = Map::default();
+            assert!(map.is_empty());
+        }
 
-        let data_3 = 42u128;
-        let _ = map.insert(data_3);
-        assert_eq!(map.len(), 3);
+        #[test]
+        fn with_capacity_is_empty() {
+            let map: Map = Map::with_capacity(3);
+            assert!(map.is_empty());
+        }
     }
 
-    #[test]
-    fn test_anymap_get() {
-        let mut map: Map = Map::with_capacity(3);
+    mod insert {
+        use super::Map;
 
-        let data_1 = String::new();
-        let _ = map.insert(data_1);
+        #[test]
+        fn increases_len() {
+            let mut map: Map = Map::with_capacity(3);
+            assert!(map.is_empty());
 
-        let data_2: Vec<u8> = Vec::new();
-        let _ = map.insert(data_2);
+            let _ = map.insert(String::new());
+            assert_eq!(map.len(), 1);
 
-        let data_3 = 42u128;
-        let _ = map.insert(data_3);
+            let _ = map.insert(Vec::<u8>::new());
+            assert_eq!(map.len(), 2);
 
-        let out_1 = map.get::<String>();
-        assert!(out_1.is_some());
+            let _ = map.insert(42u128);
+            assert_eq!(map.len(), 3);
+        }
 
-        let out_2 = map.get::<Vec<u8>>();
-        assert!(out_2.is_some());
+        #[test]
+        fn returns_none_on_new_key() {
+            let mut map: Map = Map::new();
+            assert!(map.insert(10u32).is_none());
+        }
 
-        let out_3 = map.get::<u128>();
-        assert!(out_3.is_some());
-        assert_eq!(out_3.unwrap(), &data_3);
-
-        let out_4 = map.get::<u64>();
-        assert!(out_4.is_none());
+        #[test]
+        fn returns_old_value_on_duplicate_key() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(10u32);
+            assert_eq!(map.insert(20u32), Some(10u32));
+            assert_eq!(map.get::<u32>(), Some(&20u32));
+            assert_eq!(map.len(), 1);
+        }
     }
 
-    #[test]
-    fn test_anymap_get_mut() {
-        let mut map: Map = Map::with_capacity(3);
+    mod get {
+        use super::Map;
 
-        let data_1 = String::new();
-        let _ = map.insert(data_1);
+        #[test]
+        fn returns_some_for_present_type() {
+            let mut map: Map = Map::with_capacity(3);
+            let _ = map.insert(String::new());
+            let _ = map.insert(Vec::<u8>::new());
+            let _ = map.insert(42u128);
 
-        let data_2: Vec<u8> = Vec::new();
-        let _ = map.insert(data_2);
+            assert!(map.get::<String>().is_some());
+            assert!(map.get::<Vec<u8>>().is_some());
+            assert_eq!(map.get::<u128>(), Some(&42u128));
+        }
 
-        let mut data_3 = 42u128;
-        let _ = map.insert(data_3);
-
-        let out_1 = map.get_mut::<String>();
-        assert!(out_1.is_some());
-
-        let out_2 = map.get_mut::<Vec<u8>>();
-        assert!(out_2.is_some());
-
-        let out_3 = map.get_mut::<u128>();
-        assert!(out_3.is_some());
-        assert_eq!(out_3.unwrap(), &mut data_3);
-
-        let out_4 = map.get_mut::<u64>();
-        assert!(out_4.is_none());
+        #[test]
+        fn returns_none_for_absent_type() {
+            let map: Map = Map::new();
+            assert!(map.get::<u64>().is_none());
+        }
     }
 
-    #[test]
-    fn test_anymap_remove() {
-        let mut map: Map = Map::with_capacity(3);
+    mod get_mut {
+        use super::Map;
 
-        let data_1 = String::new();
-        let _ = map.insert(data_1);
+        #[test]
+        fn returns_some_for_present_type() {
+            let mut map: Map = Map::with_capacity(3);
+            let _ = map.insert(String::new());
+            let _ = map.insert(Vec::<u8>::new());
+            let _ = map.insert(42u128);
 
-        let data_2: Vec<u8> = Vec::new();
-        let _ = map.insert(data_2);
+            assert!(map.get_mut::<String>().is_some());
+            assert!(map.get_mut::<Vec<u8>>().is_some());
+            assert_eq!(map.get_mut::<u128>(), Some(&mut 42u128));
+        }
 
-        let data_3 = 42u128;
-        let _ = map.insert(data_3);
+        #[test]
+        fn returns_none_for_absent_type() {
+            let mut map: Map = Map::new();
+            assert!(map.get_mut::<u64>().is_none());
+        }
 
-        let out_1 = map.remove::<String>();
-        assert!(out_1.is_some());
+        #[test]
+        fn mutation_is_visible_via_get() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(10u32);
+            *map.get_mut::<u32>().unwrap() = 99;
+            assert_eq!(map.get::<u32>(), Some(&99u32));
+        }
+    }
 
-        let out_2 = map.remove::<Vec<u8>>();
-        assert!(out_2.is_some());
+    mod remove {
+        use super::Map;
 
-        let out_3 = map.remove::<u128>();
-        assert!(out_3.is_some());
-        assert_eq!(out_3.unwrap(), data_3);
+        #[test]
+        fn returns_value_and_shrinks_len() {
+            let mut map: Map = Map::with_capacity(3);
+            let _ = map.insert(String::new());
+            let _ = map.insert(Vec::<u8>::new());
+            let _ = map.insert(42u128);
 
-        let out_4 = map.remove::<u64>();
-        assert!(out_4.is_none());
+            assert!(map.remove::<String>().is_some());
+            assert!(map.remove::<Vec<u8>>().is_some());
+            assert_eq!(map.remove::<u128>(), Some(42u128));
+        }
+
+        #[test]
+        fn returns_none_for_absent_type() {
+            let mut map: Map = Map::new();
+            assert!(map.remove::<u64>().is_none());
+        }
+
+        #[test]
+        fn swap_remove_keeps_remaining_entries_accessible() {
+            // Remove the first-inserted entry; swap_remove moves the last entry
+            // into its slot, so the other two must still be reachable.
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+            let _ = map.insert(2u64);
+            let _ = map.insert(3u128);
+
+            assert_eq!(map.remove::<u32>(), Some(1u32));
+            assert_eq!(map.len(), 2);
+            assert_eq!(map.get::<u64>(), Some(&2u64));
+            assert_eq!(map.get::<u128>(), Some(&3u128));
+        }
+    }
+
+    mod contains_key {
+        use super::Map;
+
+        #[test]
+        fn false_when_absent_true_when_present() {
+            use std::any::TypeId;
+
+            let mut map: Map = Map::new();
+            let u32_id = TypeId::of::<u32>();
+            let u64_id = TypeId::of::<u64>();
+
+            assert!(!map.contains_key::<u32>(&u32_id));
+
+            let _ = map.insert(1u32);
+            assert!(map.contains_key::<u32>(&u32_id));
+            assert!(!map.contains_key::<u64>(&u64_id));
+
+            map.remove::<u32>();
+            assert!(!map.contains_key::<u32>(&u32_id));
+        }
+    }
+
+    mod clear {
+        use super::Map;
+
+        #[test]
+        fn empties_the_map() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+            let _ = map.insert(2u64);
+            assert_eq!(map.len(), 2);
+
+            map.clear();
+            assert!(map.is_empty());
+            assert_eq!(map.len(), 0);
+            assert!(map.get::<u32>().is_none());
+        }
+    }
+
+    mod iterators {
+        use super::Map;
+
+        #[test]
+        fn keys_and_values_length() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+            let _ = map.insert(2u64);
+
+            assert_eq!(map.keys().count(), 2);
+            assert_eq!(map.values().count(), 2);
+        }
+
+        #[test]
+        fn into_iter_yields_all_pairs() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+            let _ = map.insert(2u64);
+
+            let pairs: Vec<_> = map.into_iter().collect();
+            assert_eq!(pairs.len(), 2);
+        }
+    }
+
+    mod raw {
+        use super::Map;
+
+        #[test]
+        fn raw_ref_and_raw_mut_expose_inner_vec() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+
+            assert_eq!(map.raw_ref().len(), 1);
+            assert_eq!(map.raw_mut().len(), 1);
+        }
+
+        #[test]
+        fn raw_consumes_and_returns_inner_vec() {
+            let mut map: Map = Map::new();
+            let _ = map.insert(1u32);
+
+            let raw = map.raw();
+            assert_eq!(raw.len(), 1);
+        }
+
+        #[test]
+        fn shrink_to_fit_preserves_data() {
+            let mut map: Map = Map::with_capacity(100);
+            let _ = map.insert(1u32);
+            map.shrink_to_fit();
+            assert_eq!(map.get::<u32>(), Some(&1u32));
+        }
     }
 }

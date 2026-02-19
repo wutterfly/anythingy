@@ -1,11 +1,12 @@
 use std::{
     any::TypeId,
     cell::UnsafeCell,
+    marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
 };
 
 /// Default size of [`Thing`][crate::Thing].
-/// Chosen to be 3x [`std::mem::size_of<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
+/// Chosen to be 3x [`std::mem::size_of::<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
 pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 
 /// A Structure for storing type-erased values. Similar to [`Box<dyn Any>`][std::any::Any] it can store values of any type.
@@ -17,56 +18,36 @@ pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 ///
 /// For types `T` which alignment is greater then 8, the value gets also boxed.
 ///
-/// # Send, Sync, UnwindSafe, RefUnwindSafe
-/// Because the type of the contained thing is erased, no assumption can be made, whether the contained thing implements any of the marker traits.
-/// Here it is advised, to create a wrapper type, that checks at creation for required traits.
+/// # Send / Sync
+/// By default, `Thing` is not `Send` or `Sync`, since it contains raw pointers and manual drop glue.
+/// To use `Thing` in a  `Send`/`Sync` manner, wrap it in a struct that implements the appropriate traits, and enforce construction only with appropriate constrains.
 ///
-/// ## Example
-/// ```rust
-/// # use anythingy::{Thing};
-/// # use std::panic::{RefUnwindSafe, UnwindSafe};
-/// struct Wrapper(Thing);
 ///
-/// impl RefUnwindSafe for Wrapper {}
-/// impl UnwindSafe for Wrapper {}
-/// // SAFETY: Trait bounds get checked at creation.
-/// unsafe impl Sync for Wrapper {}
-/// unsafe impl Send for Wrapper {}
-///
-/// impl Wrapper {
-///     pub fn new<T>(value: T) -> Self
-///     where
-///         T: Send + Sync + UnwindSafe + RefUnwindSafe + 'static
-///     {
-///         Self(Thing::new(value))
-///     }
-/// }
-/// ```
+/// # Safety notes
+/// - The internals write `T` into a byte buffer and later read it back. The code ensures that types with
+///   alignment > 8 are boxed, and `Thing` is repr(align(8)), so alignment requirements for unboxed values are satisfied.
+/// - Conversions are performed with explicit `ptr::write` / `ptr::read` into a `MaybeUninit<[u8; SIZE]>` backing buffer,
+///   avoiding reading inactive union fields.
 #[derive(Debug)]
 #[repr(align(8))]
 pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
     id: TypeId,
-    drop: fn(UnsafeCell<[MaybeUninit<u8>; SIZE]>),
-    data: UnsafeCell<[MaybeUninit<u8>; SIZE]>,
+    drop: fn(UnsafeCell<AlignedBytes<SIZE>>),
+    data: UnsafeCell<AlignedBytes<SIZE>>,
+    _not_send_sync: PhantomData<*const ()>,
 }
 
+#[derive(Debug)]
+#[repr(align(8))]
+struct AlignedBytes<const SIZE: usize>([MaybeUninit<u8>; SIZE]);
+
 impl<const SIZE: usize> Thing<SIZE> {
-    /// Creates a new `Thing` from generic type `T`. Uses the boxed value, if size of `T`  is bigger then `SIZE`.
+    /// Creates a new `Thing` from generic type `T`. Uses the boxed value, if size of `T` is bigger then `SIZE`.
     ///
     /// If the alignment of type `T` is greater then 8, `T` gets also boxed.
     ///
     /// # Panics
     /// Panics, if size of `T` is greater then `SIZE`, but `SIZE` is smaller then size of `Box<T>`.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// let sting_thing: Thing<24> = Thing::new(String::new());
-    /// let byte_thing: Thing<24> = Thing::new(Vec::<u8>::new());
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn new<T: 'static>(t: T) -> Self {
@@ -75,9 +56,12 @@ impl<const SIZE: usize> Thing<SIZE> {
 
         if Self::boxed::<T>() {
             // check that Thing can hold at least a Box.
-            assert!(Self::fitting::<Box<T>>());
+            assert!(
+                Self::fitting::<Box<T>>(),
+                "Thing<SIZE> too small to hold Box<T>"
+            );
 
-            // convert type from bytes
+            // convert type from bytes (Box<T>)
             let convert = Convert::new(Box::new(t));
 
             // convert type to bytes
@@ -87,10 +71,11 @@ impl<const SIZE: usize> Thing<SIZE> {
                 id,
                 drop: Self::drop_glue::<T>,
                 data,
+                _not_send_sync: PhantomData,
             };
         }
 
-        // convert type from bytes
+        // convert type from bytes (T)
         let convert = Convert::new(t);
 
         // convert type to bytes
@@ -103,40 +88,30 @@ impl<const SIZE: usize> Thing<SIZE> {
             Self::empty_drop_glue
         };
 
-        Self { id, drop, data }
+        Self {
+            id,
+            drop,
+            data,
+            _not_send_sync: PhantomData,
+        }
     }
 
     /// Returns the original type of `Thing`, if given type and original type match.
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.get::<u64>();
-    /// assert_eq!(number, 42);
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn get<T: 'static>(mut self) -> T {
         // check that types are matching
         assert!(self.is_type::<T>());
 
-        // IMPORTANT:
-        // marked self as NOT drop, even if it is
-        // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
-        // this leads to a double drop
+        // Prevent double-drop: mark drop as empty; we'll move the data out ourselves.
         self.drop = Self::empty_drop_glue;
 
         let data = unsafe { self.move_data_uninit() };
 
         if Self::boxed::<T>() {
-            assert!(Self::fitting::<Box<T>>());
-
             // convert type from bytes
             let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
 
@@ -154,16 +129,6 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.get_ref::<u64>();
-    /// assert_eq!(number, &42);
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn get_ref<T: 'static>(&self) -> &T {
@@ -171,6 +136,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         assert!(self.is_type::<T>());
 
         if Self::boxed::<T>() {
+            // For boxed case the stored value is a `Box<T>`; get_ref returns &Box<T> then `.as_ref()` to get &T.
             return Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref();
         }
 
@@ -181,20 +147,6 @@ impl<const SIZE: usize> Thing<SIZE> {
     ///
     /// # Panics
     /// Panics if given type and original type do not match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let mut number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.get_mut::<u64>();
-    /// assert_eq!(number, &mut 42);
-    /// *number = 123;
-    ///
-    /// let number = number_thing.get_mut::<u64>();
-    /// assert_eq!(number, &mut 123);
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn get_mut<T: 'static>(&mut self) -> &mut T {
@@ -210,16 +162,6 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.try_get::<u64>();
-    /// assert_eq!(number, Some(42));
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn try_get<T: 'static>(mut self) -> Option<T> {
@@ -228,10 +170,7 @@ impl<const SIZE: usize> Thing<SIZE> {
             return None;
         }
 
-        // IMPORTANT:
-        // marked self as NOT drop, even if it is
-        // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
-        // this leads to a double drop
+        // Prevent double-drop
         self.drop = Self::empty_drop_glue;
 
         let data = unsafe { self.move_data_uninit() };
@@ -252,16 +191,6 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns a reference to the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.try_get_ref::<u64>();
-    /// assert_eq!(number, Some(&42));
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn try_get_ref<T: 'static>(&self) -> Option<&T> {
@@ -279,16 +208,6 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let mut number_thing: Thing<24> = Thing::new(42u64);
-    /// let number = number_thing.try_get_mut::<u64>();
-    /// assert_eq!(number, Some(&mut 42));
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn try_get_mut<T: 'static>(&mut self) -> Option<&mut T> {
@@ -305,15 +224,6 @@ impl<const SIZE: usize> Thing<SIZE> {
     }
 
     /// Returns true, if erased type is equal to given type.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// let number_thing: Thing<24> = Thing::new(42u64);
-    /// assert!(number_thing.is_type::<u64>());
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub fn is_type<T: 'static>(&self) -> bool {
@@ -323,23 +233,6 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// Returns true, if `T` can be made into a `Thing`.
     ///
     /// Returns false, if `SIZE` is smaller then a needed `Box<T>`.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// // fitting
-    /// assert!(Thing::<1>::fitting::<u8>());
-    /// // not fitting
-    /// assert!(!Thing::<1>::fitting::<u16>());
-    /// // fitting
-    /// assert!(Thing::<2>::fitting::<u16>());
-    /// // fitting, but boxed
-    /// assert!(Thing::<16>::fitting::<String>());
-    /// // fitting
-    /// assert!(Thing::<24>::fitting::<String>());
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub const fn fitting<T: 'static>() -> bool {
@@ -367,23 +260,6 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns the minimum required `SIZE`, to fit `T` into a `Thing` while `T` can remain unboxed.
     /// If `T` has to be boxed, return `None`.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// // not boxed
-    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u8>(), Some(1));
-    /// // not boxed
-    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u16>(),Some(2));
-    /// // boxed
-    /// assert_eq!(Thing::<2>::size_requirement_unboxed::<u32>(), Some(4));
-    /// // not boxed
-    /// assert_eq!(Thing::<100>::size_requirement_unboxed::<u64>(),Some(8));
-    /// // boxed (maybe, TODO: fix this once alignment change hit stable)
-    /// assert!(Thing::<8>::size_requirement_unboxed::<u128>().is_none() == (std::mem::align_of::<u128>() > 8));
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub const fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
@@ -399,25 +275,6 @@ impl<const SIZE: usize> Thing<SIZE> {
     }
 
     /// Returns true, if `T` has to be boxed to be made into a `Thing`.
-    ///
-    /// Returns false, if `SIZE` is smaller then size of `T` or alignment of `T` is greater then 8.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use anythingy::{Thing};
-    /// # fn main() {
-    /// // not boxed
-    /// assert!(!Thing::<2>::boxed::<u8>());
-    /// // not boxed
-    /// assert!(!Thing::<2>::boxed::<u16>());
-    /// // boxed
-    /// assert!(Thing::<2>::boxed::<u32>());
-    /// // not boxed
-    /// assert!(!Thing::<100>::boxed::<u64>());
-    /// // boxed
-    /// assert!(Thing::<100>::boxed::<u128>() == (std::mem::align_of::<u128>() > 8));
-    /// # }
-    /// ```
     #[inline]
     #[must_use]
     pub const fn boxed<T: 'static>() -> bool {
@@ -429,103 +286,157 @@ impl<const SIZE: usize> Thing<SIZE> {
     }
 
     /// This is unsafe, because it leaves self.data in an invalid state,
-    unsafe fn move_data_uninit(&mut self) -> UnsafeCell<[MaybeUninit<u8>; SIZE]> {
-        let fill = UnsafeCell::new([MaybeUninit::<u8>::uninit(); SIZE]);
+    const unsafe fn move_data_uninit(&mut self) -> UnsafeCell<AlignedBytes<SIZE>> {
+        let fill = UnsafeCell::new(AlignedBytes([MaybeUninit::<u8>::uninit(); SIZE]));
 
         std::mem::replace(&mut self.data, fill)
     }
 
     #[inline]
-    fn drop_glue<T: 'static>(data: UnsafeCell<[MaybeUninit<u8>; SIZE]>) {
+    fn drop_glue<T: 'static>(data: UnsafeCell<AlignedBytes<SIZE>>) {
         if Self::boxed::<T>() {
-            // convert type from bytes
+            // convert type from bytes (Box<T>)
             let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
 
-            // move value out of box
+            // move value out of box and drop
             let t: Box<T> = convert.get();
-
-            // drop
             drop(t);
-
             return;
         }
 
+        // Sanity check: if the type would be stored unboxed, its alignment must fit into our buffer.
+        // If this fails in debug builds it indicates a mismatch between `boxed::<T>()` and actual alignment.
+        debug_assert!(
+            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            "alignment of T exceeds alignment of Thing storage; T should have been boxed"
+        );
+
         // convert bytes to t
-        let convert = Convert::from_bytes(data);
+        let convert = Convert::<SIZE, T>::from_bytes(data);
         let t: T = convert.get();
 
-        // drop
         drop(t);
     }
 
     #[inline]
-    const fn empty_drop_glue<const S: usize>(_: UnsafeCell<[MaybeUninit<u8>; S]>) {}
+    const fn empty_drop_glue<const S: usize>(_: UnsafeCell<AlignedBytes<S>>) {}
 }
 
 impl<const SIZE: usize> std::ops::Drop for Thing<SIZE> {
     #[inline]
     fn drop(&mut self) {
-        let drop = unsafe { self.move_data_uninit() };
-
-        (self.drop)(drop);
+        // Take ownership of the bytes buffer and call the stored drop function.
+        let drop_buf = unsafe { self.move_data_uninit() };
+        (self.drop)(drop_buf);
     }
 }
 
-/// A structure to convert a given value of type T into raw bytes and back. Using a union here instead of `std::mem::transmute`, because
-/// `std::mem::transmute` can only convert between types of equal size.
+/// Convert struct: explicit byte buffer backing plus pointer operations.
+///
+/// This avoids reading inactive union fields by using explicit `ptr::write`/`ptr::read` to manage `T` in the byte buffer.
 #[repr(align(8))]
-union Convert<const SIZE: usize, T> {
-    bytes: ManuallyDrop<UnsafeCell<[MaybeUninit<u8>; SIZE]>>,
-    data: ManuallyDrop<UnsafeCell<T>>,
+struct Convert<const SIZE: usize, T> {
+    bytes: ManuallyDrop<UnsafeCell<AlignedBytes<SIZE>>>,
+    _marker: PhantomData<T>,
 }
 
 impl<const SIZE: usize, T> Convert<SIZE, T> {
     #[inline]
-    const fn new(value: T) -> Self {
+    fn new(value: T) -> Self {
+        // Ensure the compile-time size fits into our slot (for unboxed storage)
         let size = core::mem::size_of::<T>();
+        assert!(size <= SIZE, "type size exceeds slot SIZE");
 
-        assert!(size <= SIZE);
+        // Debug-time alignment check: types that would be stored unboxed must satisfy the buffer's alignment.
+        debug_assert!(
+            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            "alignment of T exceeds alignment of Thing storage; consider boxing T"
+        );
 
-        Self {
-            data: ManuallyDrop::new(UnsafeCell::new(value)),
+        // Allocate the bytes buffer (aligned wrapper)
+        let bytes_cell = UnsafeCell::new(AlignedBytes([MaybeUninit::<u8>::uninit(); SIZE]));
+        let conv = Self {
+            bytes: ManuallyDrop::new(bytes_cell),
+            _marker: PhantomData,
+        };
+
+        // Compute a properly-typed pointer into the buffer.
+        // Safety: Thing is repr(align(8)). Call sites ensure that types with align > 8 are boxed, so align_of::<T>() <= 8 here.
+        let ptr_to_t = conv
+            .bytes
+            .get()
+            .cast::<AlignedBytes<SIZE>>()
+            .cast::<u8>()
+            .cast::<T>();
+
+        unsafe {
+            // Write the value into the buffer. This avoids creating an intermediate active union field.
+            std::ptr::write(ptr_to_t, value);
         }
+
+        conv
     }
 
     #[inline]
-    const fn bytes(self) -> UnsafeCell<[MaybeUninit<u8>; SIZE]> {
-        // SAFETY:
-        // This is safe, because Convert can only be constructed correctly.
-        ManuallyDrop::into_inner(unsafe { self.bytes })
+    const fn bytes(self) -> UnsafeCell<AlignedBytes<SIZE>> {
+        // Move out the underlying bytes buffer without running any drops
+        ManuallyDrop::into_inner(self.bytes)
     }
 
     #[inline]
-    const fn from_bytes(bytes: UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> Self {
+    const fn from_bytes(bytes: UnsafeCell<AlignedBytes<SIZE>>) -> Self {
         Self {
             bytes: ManuallyDrop::new(bytes),
+            _marker: PhantomData,
         }
     }
 
     #[inline]
     fn get(self) -> T {
-        // SAFETY:
-        // This is safe, because we guaranteed at creation of this Convert, that the type is correct.
-        ManuallyDrop::into_inner(unsafe { self.data }).into_inner()
+        // Move the T value out of the bytes buffer
+        let bytes = ManuallyDrop::into_inner(self.bytes);
+        let ptr_to_t = bytes
+            .get()
+            .cast::<AlignedBytes<SIZE>>()
+            .cast::<u8>()
+            .cast::<T>();
+
+        // Debug-time alignment check: ensure the stored T is properly aligned for an aligned read.
+        debug_assert!(
+            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            "get: alignment of T ({}) exceeds buffer alignment ({}); T should have been boxed",
+            std::mem::align_of::<T>(),
+            std::mem::align_of::<AlignedBytes<SIZE>>()
+        );
+
+        // Use aligned read now that we assert alignment in debug; this is potentially faster on some targets.
+        unsafe { std::ptr::read(ptr_to_t.cast_const()) }
     }
 
     #[inline]
-    const fn get_ref(data: &UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> &T {
-        let bytes = std::ptr::from_ref::<UnsafeCell<[std::mem::MaybeUninit<u8>; SIZE]>>(data);
-        let ptr = bytes.cast::<T>();
+    fn get_ref(data: &UnsafeCell<AlignedBytes<SIZE>>) -> &T {
+        // Debug-time alignment check: ensure the stored T would be properly aligned for reference creation.
+        debug_assert!(
+            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            "alignment of T exceeds alignment of Thing storage; T should have been boxed"
+        );
 
-        unsafe { &*ptr }
+        let ptr_to_t = data.get().cast_const().cast::<u8>().cast::<T>();
+        unsafe { &*ptr_to_t }
     }
 
     #[inline]
-    fn get_mut(data: &mut UnsafeCell<[MaybeUninit<u8>; SIZE]>) -> &mut T {
-        let bytes = std::ptr::from_mut::<UnsafeCell<[std::mem::MaybeUninit<u8>; SIZE]>>(data);
-        let ptr = bytes.cast::<T>();
+    fn get_mut(data: &mut UnsafeCell<AlignedBytes<SIZE>>) -> &mut T {
+        // Debug-time alignment check: ensure the stored T would be properly aligned for mutable reference creation.
+        debug_assert!(
+            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            "alignment of T exceeds alignment of Thing storage; T should have been boxed"
+        );
 
-        unsafe { &mut *ptr }
+        let ptr_to_t = std::ptr::from_mut::<AlignedBytes<SIZE>>(data.get_mut())
+            .cast::<u8>()
+            .cast::<T>();
+        unsafe { &mut *ptr_to_t }
     }
 }
 
@@ -533,168 +444,296 @@ impl<const SIZE: usize, T> std::fmt::Debug for Convert<SIZE, T> {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = std::any::type_name::<T>();
-
-        let bytes = unsafe { &*(self.bytes.get() as *const _) };
-
-        write!(f, "{name}: {:?}", bytes)
+        let bytes = unsafe { &*(self.bytes.get().cast_const()) };
+        write!(f, "{name}: {bytes:?}")
     }
 }
 
 #[cfg(test)]
-mod tests_thing {
-
-    use std::sync::RwLock;
-
+mod tests {
     use crate::Thing;
 
-    #[test]
-    fn test_fitting() {
-        let fitting = Thing::<1>::fitting::<u8>();
-        assert!(fitting);
+    mod predicates {
+        use super::Thing;
 
-        let fitting = Thing::<1>::fitting::<u16>();
-        assert!(!fitting);
-
-        let fitting = Thing::<2>::fitting::<u16>();
-        assert!(fitting);
-    }
-
-    #[test]
-    fn test_thing_new_unboxed() {
-        let data_1 = 123u8;
-        let _: Thing = Thing::new(data_1);
-
-        let data_2 = 123usize;
-        let _: Thing = Thing::new(data_2);
-
-        let data_3 = (123usize, 456usize);
-        let _: Thing = Thing::new(data_3);
-
-        let data_4 = String::new();
-        let _: Thing = Thing::new(data_4);
-    }
-
-    #[test]
-    fn test_thing_new_boxed() {
-        let data_1 = (123usize, 456usize, 789usize, 012usize);
-        let _: Thing = Thing::new(data_1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_thing_new_boxed_too_small() {
-        let data_1 = 123u32;
-        _ = Thing::<1>::new(data_1);
-    }
-
-    #[test]
-    fn test_thing_get_unboxed() {
-        let data_1 = 123usize;
-        let thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get::<usize>();
-        assert_eq!(data_1, data_1_out);
-
-        let data_2 = (123usize, 456usize);
-        let thing_2: Thing = Thing::new(data_2);
-        let data_2_out = thing_2.get::<(usize, usize)>();
-        assert_eq!(data_2, data_2_out);
-    }
-
-    #[test]
-    fn test_thing_get_boxed() {
-        let data_1 = (123usize, 456usize, 789usize, 012usize);
-        let thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get::<(usize, usize, usize, usize)>();
-        assert_eq!(data_1, data_1_out);
-    }
-
-    #[test]
-    fn test_thing_get_ref_unboxed() {
-        let data_1 = 123usize;
-        let thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get_ref::<usize>();
-        assert_eq!(&data_1, data_1_out);
-
-        let data_2 = (123usize, 456usize);
-        let thing_2: Thing = Thing::new(data_2);
-        let data_2_out = thing_2.get_ref::<(usize, usize)>();
-        assert_eq!(&data_2, data_2_out);
-    }
-
-    #[test]
-    fn test_thing_get_ref_boxed() {
-        let data_1 = (123usize, 456usize, 789usize, 012usize);
-        let thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get_ref::<(usize, usize, usize, usize)>();
-        assert_eq!(&data_1, data_1_out);
-    }
-
-    #[test]
-    fn test_thing_get_mut_unboxed() {
-        let data_1 = 123usize;
-        let mut thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get_mut::<usize>();
-        assert_eq!(&data_1, data_1_out);
-        *data_1_out = 987;
-        let data_1_out = thing_1.get::<usize>();
-        assert_eq!(987, data_1_out);
-
-        let data_2 = (123usize, 456usize);
-        let mut thing_2: Thing = Thing::new(data_2);
-        let data_2_out = thing_2.get_mut::<(usize, usize)>();
-        assert_eq!(&data_2, data_2_out);
-        *data_2_out = (987, 654);
-        let data_2_out = thing_2.get::<(usize, usize)>();
-        assert_eq!((987, 654), data_2_out);
-    }
-
-    #[test]
-    fn test_thing_get_mut_boxed() {
-        let data_1 = (123usize, 456usize, 789usize, 012usize);
-        let mut thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get_mut::<(usize, usize, usize, usize)>();
-        assert_eq!(&data_1, data_1_out);
-        *data_1_out = (987, 654, 321, 012);
-        let data_1_out = thing_1.get::<(usize, usize, usize, usize)>();
-        assert_eq!((987, 654, 321, 012), data_1_out);
-    }
-
-    #[test]
-    fn test_thing_alignment() {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #[repr(align(16))]
-        struct TestAlign {
-            data: u8,
+        #[test]
+        fn size_requirement_unboxed_returns_size_for_normal_types() {
+            assert_eq!(Thing::<1>::size_requirement_unboxed::<u8>(), Some(1));
+            assert_eq!(Thing::<24>::size_requirement_unboxed::<u8>(), Some(1));
         }
 
-        let data_1 = TestAlign { data: 42 };
-        let thing: Thing = Thing::new(data_1);
-
-        let out_1 = thing.get_ref::<TestAlign>();
-        assert_eq!(&data_1, out_1)
-    }
-
-    #[test]
-    fn test_get_ref_with_unsafecell() {
-        /// Using types that contain interior mutability was problematic.
-        ///
-        /// De-referencing a *const T to a &T, where T contains (somewhere) a UnsafeCell, is UB.
-        /// A shared reference (&T) points to immutable memory, allowing certain optimizations. UnsafeCell disables this.
-        /// Because Thing is a generic type, it can't be ruled out that the stored type contains a UnsafeCell.
-        /// The prevent UB upfront, internal data is always wrapped in an UnsafeCell.
-        ///
-        /// Miri Error:
-        /// trying to retag from <205684> for SharedReadWrite permission at [..], but that tag only grants SharedReadOnly permission for this location
-        struct Test {
-            _lock: RwLock<u32>,
+        #[test]
+        fn size_requirement_unboxed_returns_none_for_high_alignment() {
+            #[repr(align(16))]
+            struct A16(#[allow(dead_code)] u8);
+            assert_eq!(Thing::<24>::size_requirement_unboxed::<A16>(), None);
         }
 
-        let data_1 = Test {
-            _lock: RwLock::new(42),
-        };
+        #[test]
+        fn size_requirement_returns_box_size_for_high_alignment() {
+            #[repr(align(16))]
+            struct A16(#[allow(dead_code)] u8);
+            assert_eq!(
+                Thing::<24>::size_requirement::<A16>(),
+                std::mem::size_of::<Box<A16>>()
+            );
+        }
 
-        let thing_1: Thing = Thing::new(data_1);
-        let data_1_out = thing_1.get_ref::<Test>();
-        assert_eq!(*data_1_out._lock.read().unwrap(), 42);
+        #[test]
+        fn size_requirement_returns_type_size_for_normal_types() {
+            assert_eq!(Thing::<24>::size_requirement::<u8>(), 1);
+            assert_eq!(Thing::<24>::size_requirement::<u64>(), 8);
+        }
+
+        #[test]
+        fn boxed_true_when_type_too_large_for_slot() {
+            assert!(Thing::<1>::boxed::<u32>());
+        }
+
+        #[test]
+        fn boxed_false_when_type_fits_in_slot() {
+            assert!(!Thing::<24>::boxed::<u64>());
+        }
+
+        #[test]
+        fn boxed_true_for_high_alignment_type() {
+            #[repr(align(16))]
+            struct A(#[allow(dead_code)] u8);
+            assert!(Thing::<24>::boxed::<A>());
+        }
+
+        #[test]
+        fn fitting_true_when_type_fits() {
+            assert!(Thing::<8>::fitting::<u64>());
+        }
+
+        #[test]
+        fn fitting_false_when_slot_too_small() {
+            assert!(!Thing::<1>::fitting::<u64>());
+        }
+    }
+
+    mod unboxed {
+        use super::Thing;
+
+        #[test]
+        fn get_roundtrip() {
+            assert_eq!(Thing::<24>::new(1u8).get::<u8>(), 1u8);
+            assert_eq!(Thing::<24>::new(2u16).get::<u16>(), 2u16);
+            assert_eq!(Thing::<24>::new(3u32).get::<u32>(), 3u32);
+            let t = Thing::<24>::new((10u64, 20u64, 30u64));
+            assert_eq!(t.get::<(u64, u64, u64)>(), (10u64, 20u64, 30u64));
+        }
+
+        #[test]
+        fn get_ref_then_get_mut_then_get() {
+            let mut t: Thing<24> = Thing::new(10usize);
+            assert_eq!(*t.get_ref::<usize>(), 10usize);
+            *t.get_mut::<usize>() = 20usize;
+            assert_eq!(t.get::<usize>(), 20usize);
+        }
+
+        #[test]
+        fn zst_roundtrip() {
+            struct Z;
+            let t: Thing<1> = Thing::new(Z);
+            let _z: Z = t.get::<Z>();
+        }
+
+        #[test]
+        fn exact_size_slot() {
+            let arr: Thing<8> = Thing::new([7u8; 8]);
+            assert_eq!(arr.get::<[u8; 8]>(), [7u8; 8]);
+        }
+
+        #[test]
+        fn string_ownership_roundtrip() {
+            let t: Thing<24> = Thing::new(String::from("owned"));
+            assert_eq!(t.get::<String>(), "owned");
+        }
+
+        #[test]
+        fn vec_roundtrip() {
+            let t: Thing<24> = Thing::new(vec![1u8, 2, 3]);
+            assert_eq!(t.get::<Vec<u8>>(), vec![1u8, 2, 3]);
+        }
+
+        #[test]
+        fn get_ref_with_interior_mutability() {
+            use std::sync::RwLock;
+            struct Inner {
+                lock: RwLock<u32>,
+            }
+            let t: Thing<24> = Thing::new(Inner {
+                lock: RwLock::new(99),
+            });
+            assert_eq!(*t.get_ref::<Inner>().lock.read().unwrap(), 99);
+        }
+
+        #[test]
+        fn get_panics_on_type_mismatch() {
+            let result = std::panic::catch_unwind(|| {
+                let t: Thing<24> = Thing::new(1u32);
+                let _ = t.get::<u64>();
+            });
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn get_ref_panics_on_type_mismatch() {
+            let result = std::panic::catch_unwind(|| {
+                let t: Thing<24> = Thing::new(1u32);
+                let _ = t.get_ref::<u64>();
+            });
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn get_mut_panics_on_type_mismatch() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut t: Thing<24> = Thing::new(1u32);
+                let _ = t.get_mut::<u64>();
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    mod boxed {
+        use super::Thing;
+
+        #[test]
+        fn get_roundtrip_size_forced() {
+            let big = (1usize, 2usize, 3usize, 4usize);
+            let thing: Thing<8> = Thing::new(big);
+            assert_eq!(thing.get::<(usize, usize, usize, usize)>().2, 3usize);
+        }
+
+        #[test]
+        fn get_roundtrip_alignment_forced() {
+            #[repr(align(16))]
+            struct A16(u8);
+            assert!(Thing::<24>::boxed::<A16>());
+            let val = Thing::<32>::new(A16(5)).get::<A16>();
+            assert_eq!(val.0, 5u8);
+        }
+
+        #[test]
+        fn six_usize_tuple_roundtrip() {
+            let big = (0usize, 1usize, 2usize, 3usize, 4usize, 5usize);
+            let out = Thing::<8>::new(big).get::<(usize, usize, usize, usize, usize, usize)>();
+            assert_eq!(out.0, 0usize);
+        }
+    }
+
+    mod try_get {
+        use super::Thing;
+
+        #[test]
+        fn unboxed_success() {
+            assert_eq!(Thing::<24>::new(99u32).try_get::<u32>(), Some(99u32));
+        }
+
+        #[test]
+        fn unboxed_mismatch_returns_none() {
+            assert!(Thing::<24>::new(55u64).try_get::<u32>().is_none());
+        }
+
+        #[test]
+        fn boxed_success() {
+            #[repr(align(16))]
+            #[derive(Debug, PartialEq)]
+            struct A16(u32);
+            assert_eq!(Thing::<32>::new(A16(77)).try_get::<A16>(), Some(A16(77)));
+        }
+    }
+
+    mod try_get_ref {
+        use super::Thing;
+
+        #[test]
+        fn unboxed_success() {
+            let t: Thing<24> = Thing::new(100u32);
+            assert_eq!(t.try_get_ref::<u32>(), Some(&100u32));
+        }
+
+        #[test]
+        fn unboxed_mismatch_returns_none() {
+            assert!(Thing::<24>::new(55u64).try_get_ref::<u32>().is_none());
+        }
+
+        #[test]
+        fn boxed_success() {
+            #[repr(align(16))]
+            struct A16(u32);
+            let t: Thing<32> = Thing::new(A16(88));
+            assert_eq!(t.try_get_ref::<A16>().unwrap().0, 88);
+        }
+    }
+
+    mod try_get_mut {
+        use super::Thing;
+
+        #[test]
+        fn unboxed_success_and_mutation() {
+            let mut t: Thing<24> = Thing::new(42u32);
+            *t.try_get_mut::<u32>().unwrap() = 99;
+            assert_eq!(t.get_ref::<u32>(), &99u32);
+        }
+
+        #[test]
+        fn unboxed_mismatch_returns_none() {
+            let mut t: Thing<24> = Thing::new(66u32);
+            assert!(t.try_get_mut::<u64>().is_none());
+        }
+
+        #[test]
+        fn boxed_success_and_mutation() {
+            #[repr(align(16))]
+            struct A16(u32);
+            let mut t: Thing<32> = Thing::new(A16(99));
+            t.try_get_mut::<A16>().unwrap().0 = 100;
+            assert_eq!(t.get_ref::<A16>().0, 100);
+        }
+    }
+
+    mod drop_glue {
+        use super::Thing;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountDrop;
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn unboxed_drop_runs_once() {
+            DROPS.store(0, Ordering::SeqCst);
+            drop(Thing::<32>::new(CountDrop));
+            assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn boxed_drop_runs() {
+            #[repr(align(16))]
+            struct AlignDrop(CountDrop);
+
+            DROPS.store(0, Ordering::SeqCst);
+            drop(Thing::<32>::new(AlignDrop(CountDrop)));
+            assert!(DROPS.load(Ordering::SeqCst) >= 1);
+        }
+    }
+
+    mod debug {
+        use super::Thing;
+
+        #[test]
+        fn thing_debug_is_non_empty() {
+            let t: Thing<24> = Thing::new(42u32);
+            assert!(!format!("{t:?}").is_empty());
+        }
     }
 }
