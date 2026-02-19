@@ -1,11 +1,11 @@
 //! # Anythingy
-//! **This is a work-in-progess project and not for production use.**
+//! **This is a work-in-progress project and not for production use.**
 //!
 //! A library for dynamic typing.
 //!
 //!
 //! It's main feature is the [`Thing`] type, that works similar to [`Box<dyn Any>`][std::any::Any], but can be sized at compile time.
-//! Additonal type maps for storing objects of different types are provided:
+//! Additional type maps for storing objects of different types are provided:
 //!
 //! * [`AnyMap`] using a [`HashMap`][std::collections::hash_map::HashMap] for storing a large number of different types.
 //! * [`SmallAnyMap`] using a [`Vec`] for storing a small number of different types.

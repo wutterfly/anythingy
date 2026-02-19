@@ -5,7 +5,7 @@ use std::{
 };
 
 /// Default size of [`Thing`][crate::Thing].
-/// Choosen to be 3x [`std::mem::size_of<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
+/// Chosen to be 3x [`std::mem::size_of<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
 pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 
 /// A Structure for storing type-erased values. Similar to [`Box<dyn Any>`][std::any::Any] it can store values of any type.
@@ -15,7 +15,7 @@ pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
 ///
 /// For types `T` that are greater then `SIZE`, the value gets boxed.
 ///
-/// For types `T` wich alignment is greater then 8, the value gets also boxed.
+/// For types `T` which alignment is greater then 8, the value gets also boxed.
 ///
 /// # Send, Sync, UnwindSafe, RefUnwindSafe
 /// Because the type of the contained thing is erased, no assumption can be made, whether the contained thing implements any of the marker traits.
@@ -56,7 +56,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// If the alignment of type `T` is greater then 8, `T` gets also boxed.
     ///
     /// # Panics
-    /// Panics, if size of `T` is greate then `SIZE`, but `SIZE` is smaller then size of `Box<T>`.
+    /// Panics, if size of `T` is greater then `SIZE`, but `SIZE` is smaller then size of `Box<T>`.
     ///
     /// # Example
     /// ```rust
@@ -127,7 +127,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         assert!(self.is_type::<T>());
 
         // IMPORTANT:
-        // markt self as NOT drop, even if it is
+        // marked self as NOT drop, even if it is
         // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
@@ -229,7 +229,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         }
 
         // IMPORTANT:
-        // markt self as NOT drop, even if it is
+        // marked self as NOT drop, even if it is
         // self gets dropped at the end of the function call, while a valid instance of T also gets returned,
         // this leads to a double drop
         self.drop = Self::empty_drop_glue;
@@ -357,7 +357,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         let boxed = std::mem::size_of::<Box<T>>();
         let align = std::mem::align_of::<T>();
 
-        // value always has to be boxed if align is greate then 8
+        // value always has to be boxed if align is greater then 8
         if align > 8 || size > boxed {
             return boxed;
         }
@@ -390,7 +390,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
-        // value always has to be boxed if align is greate then 8
+        // value always has to be boxed if align is greater then 8
         if align > 8 {
             return None;
         }
@@ -400,7 +400,7 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns true, if `T` has to be boxed to be made into a `Thing`.
     ///
-    /// Returns false, if `SIZE` is smaller then size of `T` or alignment of `T` is greate then 8.
+    /// Returns false, if `SIZE` is smaller then size of `T` or alignment of `T` is greater then 8.
     ///
     /// # Example
     /// ```rust
