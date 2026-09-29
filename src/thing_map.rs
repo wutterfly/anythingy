@@ -77,7 +77,7 @@ pub type TypeIdBuildHasher = BuildHasherDefault<TypeIdHasher>;
 ///
 /// Like `Thing`, a `ThingMap` is neither `Send` nor `Sync`, since the values
 /// it holds are not required to be. For a map that is, whose values must all
-/// be `Send + Sync`, see [`SyncThingMap`](crate::SyncThingMap).
+/// be `Send + Sync`, see [`SThingMap`](crate::SThingMap).
 ///
 /// ```compile_fail,E0277
 /// fn assert_send<T: Send>() {}

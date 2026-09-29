@@ -3,18 +3,25 @@
 //!
 //! | Type | What it is |
 //! |---|---|
-//! | [`Thing`] | A type-erased value, like `Box<dyn Any>`, that stores small values inline |
+//! | [`Thing`], [`SThing`] | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is thread-safe) |
 //! | [`TokenStore`] | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 //! | [`InlineVec`] | A vector that keeps its first few elements inline and only allocates beyond that |
 //! | [`LinearMap`], [`LinearSet`] | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
-//! | `ThingMap`, `SyncThingMap` | One value per type, looked up by the type (the second is thread-safe) |
-//! | `EventQueue` | A multi-producer queue that is drained in batches |
+#![cfg_attr(
+    feature = "std",
+    doc = "| [`ThingMap`], [`SThingMap`] | One value per type, looked up by the type (the second is thread-safe) |"
+)]
+#![cfg_attr(
+    feature = "std",
+    doc = "| [`EventQueue`] | A multi-producer queue that is drained in batches |"
+)]
 //!
 //! # Features and `no_std`
 //!
 //! The crate is `no_std`-compatible and only needs `alloc`. The default `std`
 //! feature adds the types that need the standard library (`ThingMap`,
-//! `SyncThingMap` and `EventQueue`). To use the rest without `std`:
+//! `SThingMap` and `EventQueue`, listed above only when it is enabled).
+//! To use the rest without `std`:
 //!
 //! ```toml
 //! anythingy = { version = "0.3", default-features = false }
@@ -32,8 +39,9 @@ pub mod event_queue;
 pub mod inline_vec;
 pub mod linear_map;
 pub mod linear_set;
+pub mod sthing;
 #[cfg(feature = "std")]
-pub mod sync_thing_map;
+pub mod sthing_map;
 pub mod thing;
 #[cfg(feature = "std")]
 pub mod thing_map;
@@ -44,8 +52,9 @@ pub use event_queue::EventQueue;
 pub use inline_vec::InlineVec;
 pub use linear_map::LinearMap;
 pub use linear_set::LinearSet;
+pub use sthing::SThing;
 #[cfg(feature = "std")]
-pub use sync_thing_map::SyncThingMap;
+pub use sthing_map::SThingMap;
 pub use thing::Thing;
 #[cfg(feature = "std")]
 pub use thing_map::ThingMap;

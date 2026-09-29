@@ -1,6 +1,6 @@
 //! A `Send + Sync` map with one value per type.
 //!
-//! See [`SyncThingMap`] for details.
+//! See [`SThingMap`] for details.
 
 use std::any::TypeId;
 use std::collections::TryReserveError;
@@ -14,7 +14,7 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 ///
 /// `ThingMap` can hold values of any type, including ones that are not
 /// thread-safe, so it cannot be sent to other threads or shared between them.
-/// `SyncThingMap` only accepts values that are `Send + Sync`
+/// `SThingMap` only accepts values that are `Send + Sync`
 /// ([`insert`](Self::insert) and [`entry`](Self::entry) require it), so the map
 /// itself is `Send + Sync` (with a `Send`/`Sync` hasher, which the default
 /// is) and can be moved to another thread, shared in an `Arc`, or kept in a
@@ -33,9 +33,9 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 /// use std::sync::{Arc, RwLock};
 /// use std::thread;
 ///
-/// use anythingy::SyncThingMap;
+/// use anythingy::SThingMap;
 ///
-/// let mut map = SyncThingMap::<24>::new();
+/// let mut map = SThingMap::<24>::new();
 /// map.insert(AtomicUsize::new(0));
 /// map.insert(String::from("shared"));
 /// let map = Arc::new(RwLock::new(map));
@@ -62,7 +62,7 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 ///
 /// ```compile_fail,E0277
 /// use std::hash::{BuildHasher, DefaultHasher};
-/// use anythingy::SyncThingMap;
+/// use anythingy::SThingMap;
 ///
 /// struct NotSend(*const ());
 /// impl BuildHasher for NotSend {
@@ -73,7 +73,7 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 /// }
 ///
 /// fn assert_send<T: Send>() {}
-/// assert_send::<SyncThingMap<24, NotSend>>();
+/// assert_send::<SThingMap<24, NotSend>>();
 /// ```
 ///
 /// A value that is not thread-safe is rejected at compile time. `Rc` is not
@@ -81,9 +81,9 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 ///
 /// ```compile_fail,E0277
 /// use std::rc::Rc;
-/// use anythingy::SyncThingMap;
+/// use anythingy::SThingMap;
 ///
-/// let mut map = SyncThingMap::<24>::new();
+/// let mut map = SThingMap::<24>::new();
 /// map.insert(Rc::new(1));
 /// ```
 ///
@@ -91,12 +91,12 @@ use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
 ///
 /// ```compile_fail,E0277
 /// use std::cell::Cell;
-/// use anythingy::SyncThingMap;
+/// use anythingy::SThingMap;
 ///
-/// let mut map = SyncThingMap::<24>::new();
+/// let mut map = SThingMap::<24>::new();
 /// map.insert(Cell::new(1));
 /// ```
-pub struct SyncThingMap<const SIZE: usize = DEFAULT_THING_SIZE, S = TypeIdBuildHasher> {
+pub struct SThingMap<const SIZE: usize = DEFAULT_THING_SIZE, S = TypeIdBuildHasher> {
     /// Invariant: every value in it is `Send + Sync`. Only `insert` and
     /// `entry` add values, and both require it. No `&mut ThingMap` is ever
     /// handed out, which would let a caller insert a value of any type.
@@ -110,15 +110,15 @@ pub struct SyncThingMap<const SIZE: usize = DEFAULT_THING_SIZE, S = TypeIdBuildH
 // thread-local state.
 // The lint cannot see that the values are `Send` by construction; see above.
 #[allow(clippy::non_send_fields_in_send_ty)]
-unsafe impl<const SIZE: usize, S: Send> Send for SyncThingMap<SIZE, S> {}
+unsafe impl<const SIZE: usize, S: Send> Send for SThingMap<SIZE, S> {}
 
 // SAFETY: every value in the map is `Sync` (struct invariant), and the shared
-// operations only hand out `&T`; nothing in a shared `&SyncThingMap` mutates
+// operations only hand out `&T`; nothing in a shared `&SThingMap` mutates
 // the map or its values (except through the values' own `Sync` interior
 // mutability). The hasher is used through `&S`.
-unsafe impl<const SIZE: usize, S: Sync> Sync for SyncThingMap<SIZE, S> {}
+unsafe impl<const SIZE: usize, S: Sync> Sync for SThingMap<SIZE, S> {}
 
-impl<const SIZE: usize> SyncThingMap<SIZE, TypeIdBuildHasher> {
+impl<const SIZE: usize> SThingMap<SIZE, TypeIdBuildHasher> {
     /// Creates an empty map. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
@@ -136,7 +136,7 @@ impl<const SIZE: usize> SyncThingMap<SIZE, TypeIdBuildHasher> {
     }
 }
 
-impl<const SIZE: usize, S> SyncThingMap<SIZE, S> {
+impl<const SIZE: usize, S> SThingMap<SIZE, S> {
     /// Creates an empty map that hashes its keys with `hash_builder`.
     pub const fn with_hasher(hash_builder: S) -> Self {
         Self {
@@ -192,7 +192,7 @@ impl<const SIZE: usize, S> SyncThingMap<SIZE, S> {
     }
 }
 
-impl<const SIZE: usize, S: BuildHasher> SyncThingMap<SIZE, S> {
+impl<const SIZE: usize, S: BuildHasher> SThingMap<SIZE, S> {
     /// Reserves room for at least `additional` more types.
     pub fn reserve(&mut self, additional: usize) {
         self.inner.reserve(additional);
@@ -277,7 +277,7 @@ impl<const SIZE: usize, S: BuildHasher> SyncThingMap<SIZE, S> {
     }
 }
 
-impl<const SIZE: usize, S: Default> Default for SyncThingMap<SIZE, S> {
+impl<const SIZE: usize, S: Default> Default for SThingMap<SIZE, S> {
     fn default() -> Self {
         Self {
             inner: ThingMap::default(),
@@ -285,7 +285,7 @@ impl<const SIZE: usize, S: Default> Default for SyncThingMap<SIZE, S> {
     }
 }
 
-impl<const SIZE: usize, S> fmt::Debug for SyncThingMap<SIZE, S> {
+impl<const SIZE: usize, S> fmt::Debug for SThingMap<SIZE, S> {
     /// Lists the `TypeId`s of the stored values.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.inner, f)
@@ -299,7 +299,7 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock, RwLock};
     use std::thread;
 
-    type Map = SyncThingMap<24>;
+    type Map = SThingMap<24>;
 
     fn assert_send_sync<X: Send + Sync>() {}
 
@@ -308,8 +308,8 @@ mod tests {
     #[test]
     fn the_map_is_send_and_sync() {
         assert_send_sync::<Map>();
-        assert_send_sync::<SyncThingMap<8>>();
-        assert_send_sync::<SyncThingMap<24, RandomState>>();
+        assert_send_sync::<SThingMap<8>>();
+        assert_send_sync::<SThingMap<24, RandomState>>();
     }
 
     // ---- the same behaviour as ThingMap ----
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn housekeeping_default_debug_and_hasher() {
-        let mut map = SyncThingMap::<24>::with_capacity(8);
+        let mut map = SThingMap::<24>::with_capacity(8);
         assert!(map.capacity() >= 8);
         map.reserve(32);
         map.try_reserve(16).unwrap();
@@ -380,16 +380,16 @@ mod tests {
         map.shrink_to_fit();
         assert!(map.is_empty());
 
-        let map: SyncThingMap = SyncThingMap::default();
+        let map: SThingMap = SThingMap::default();
         assert!(map.is_empty());
-        assert!(SyncThingMap::<24>::fits::<String>());
-        assert!(!SyncThingMap::<4>::fits::<String>());
+        assert!(SThingMap::<24>::fits::<String>());
+        assert!(!SThingMap::<4>::fits::<String>());
 
-        let mut map = SyncThingMap::<24, RandomState>::with_hasher(RandomState::new());
+        let mut map = SThingMap::<24, RandomState>::with_hasher(RandomState::new());
         map.insert(1u8);
         let _: &RandomState = map.hasher();
         assert!(format!("{map:?}").starts_with("{TypeId("));
-        let map = SyncThingMap::<24, RandomState>::with_capacity_and_hasher(4, RandomState::new());
+        let map = SThingMap::<24, RandomState>::with_capacity_and_hasher(4, RandomState::new());
         assert!(map.capacity() >= 4);
     }
 
@@ -553,8 +553,8 @@ mod tests {
 
     #[test]
     fn a_global_map_behind_a_mutex() {
-        static GLOBAL: OnceLock<Mutex<SyncThingMap<24>>> = OnceLock::new();
-        let global = GLOBAL.get_or_init(|| Mutex::new(SyncThingMap::new()));
+        static GLOBAL: OnceLock<Mutex<SThingMap<24>>> = OnceLock::new();
+        let global = GLOBAL.get_or_init(|| Mutex::new(SThingMap::new()));
 
         let workers: Vec<_> = (0..4)
             .map(|_| {

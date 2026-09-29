@@ -7,11 +7,11 @@ Collections and containers with different space/time trade-offs than the ones in
 
 | Type | What it is |
 |---|---|
-| `Thing` | A type-erased value, like `Box<dyn Any>`, that stores small values inline |
+| `Thing`, `SThing` | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is `Send + Sync`) |
 | `TokenStore` | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 | `InlineVec` | A vector that keeps its first few elements inline and only allocates beyond that |
 | `LinearMap`, `LinearSet` | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
-| `ThingMap`, `SyncThingMap` | One value per type, looked up by the type (the second is `Send + Sync`) |
+| `ThingMap`, `SThingMap` | One value per type, looked up by the type (the second is `Send + Sync`) |
 | `EventQueue` | A multi-producer queue that is drained in batches |
 
 ## Example
@@ -42,7 +42,7 @@ assert_eq!(resources.get::<u32>(), Some(&42));
 
 ## Features
 
-The default `std` feature adds `ThingMap`, `SyncThingMap` and `EventQueue`. Everything else works with
+The default `std` feature adds `ThingMap`, `SThingMap` and `EventQueue`. Everything else works with
 only `core` and `alloc`:
 
 ```toml

@@ -78,7 +78,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Everything except `EventQueue`, `ThingMap` and `SyncThingMap` must build
+  # Everything except `EventQueue`, `ThingMap` and `SThingMap` must build
   # for a target that has no standard library.
   no-std:
     name: no_std (bare metal)

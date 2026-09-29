@@ -1,12 +1,12 @@
-//! `SyncThingMap`: a `ThingMap` that can be shared between threads.
+//! `SThingMap`: a `ThingMap` that can be shared between threads.
 //!
-//! Run with: `cargo run --example sync_thing_map`
+//! Run with: `cargo run --example sthing_map`
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use anythingy::SyncThingMap;
+use anythingy::SThingMap;
 
 struct Config {
     workers: usize,
@@ -15,7 +15,7 @@ struct Config {
 fn main() {
     // Only `Send + Sync` values are accepted, so the map itself is
     // `Send + Sync` and can be shared.
-    let mut resources = SyncThingMap::<24>::new();
+    let mut resources = SThingMap::<24>::new();
     resources.insert(Config { workers: 4 });
     resources.insert(AtomicUsize::new(0));
     let resources = Arc::new(RwLock::new(resources));

@@ -26,9 +26,9 @@ pub const DEFAULT_THING_SIZE: usize = core::mem::size_of::<usize>() * 3;
 /// # Send / Sync
 ///
 /// A `Thing` is neither `Send` nor `Sync`, because it can hold any type,
-/// including ones that are not thread-safe. To share type-erased values
-/// between threads, use `SyncThingMap` (available with the `std` feature),
-/// which only accepts `Send + Sync` values.
+/// including ones that are not thread-safe. To move or share type-erased
+/// values between threads, use [`SThing`](crate::SThing), which can only be
+/// created from `Send + Sync` values.
 ///
 /// ```compile_fail,E0277
 /// fn assert_send<T: Send>() {}
