@@ -1,6 +1,6 @@
 [package]
 name = "anythingy"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.88"
 description = "Collections with different space/time trade-offs: a type-erased Thing, a generational TokenStore, InlineVec, LinearMap and LinearSet, a type map and an event queue."

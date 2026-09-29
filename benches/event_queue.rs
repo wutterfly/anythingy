@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anythingy::EventQueue;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -300,11 +301,150 @@ fn bench_produce_then_drain(c: &mut Criterion) {
     group.finish();
 }
 
+/// Steady state: the same queue is filled and drained over and over, the way
+/// a game loop or an event bus uses it. Each round pushes `PER_ROUND` events
+/// from one thread; only the drain (and reading the events) is timed, since
+/// that is the part that differs between the variants. The pushes into a
+/// queue that keeps its buffers are covered by `single_thread_push`.
+fn bench_steady_state(c: &mut Criterion) {
+    let mut group = c.benchmark_group("steady_state_drain");
+    const PER_ROUND: usize = 10_000;
+
+    group.bench_function("EventQueue::drain", |b| {
+        let q = EventQueue::new();
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                for i in 0..PER_ROUND {
+                    q.push(i);
+                }
+                let start = Instant::now();
+                let events = q.drain();
+                black_box(events.iter().sum::<usize>());
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+
+    group.bench_function("EventQueue::drain_into (reused Vec)", |b| {
+        let q = EventQueue::new();
+        let mut out = Vec::new();
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                for i in 0..PER_ROUND {
+                    q.push(i);
+                }
+                let start = Instant::now();
+                out.clear();
+                q.drain_into(&mut out);
+                black_box(out.iter().sum::<usize>());
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+
+    group.bench_function("EventQueue::drain_each", |b| {
+        let q = EventQueue::new();
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                for i in 0..PER_ROUND {
+                    q.push(i);
+                }
+                let start = Instant::now();
+                let mut sum = 0;
+                q.drain_each(|batch| sum += batch.iter().sum::<usize>());
+                black_box(sum);
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+
+    group.bench_function("Mutex<Vec> (swap with reused Vec)", |b| {
+        let m = Mutex::new(Vec::new());
+        let mut out = Vec::new();
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                for i in 0..PER_ROUND {
+                    m.lock().unwrap().push(i);
+                }
+                let start = Instant::now();
+                out.clear();
+                std::mem::swap(&mut *m.lock().unwrap(), &mut out);
+                black_box(out.iter().sum::<usize>());
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
+/// Like `steady_state_round`, but with several producer threads, so that a
+/// drain has more than one buffer to collect. Thread start-up is part of
+/// every round, and is the same for all variants.
+fn bench_steady_state_threads(c: &mut Criterion) {
+    let mut group = c.benchmark_group("steady_state_round_4_threads");
+    const THREADS: usize = 4;
+    const PER_THREAD: usize = 2_500;
+
+    fn produce(q: &EventQueue<usize>) {
+        thread::scope(|s| {
+            for _ in 0..THREADS {
+                s.spawn(|| {
+                    for i in 0..PER_THREAD {
+                        q.push(i);
+                    }
+                });
+            }
+        });
+    }
+
+    group.bench_function("EventQueue::drain", |b| {
+        let q = EventQueue::new();
+        b.iter(|| {
+            produce(&q);
+            black_box(q.drain().iter().sum::<usize>())
+        });
+    });
+
+    group.bench_function("EventQueue::drain_into (reused Vec)", |b| {
+        let q = EventQueue::new();
+        let mut out = Vec::new();
+        b.iter(|| {
+            produce(&q);
+            out.clear();
+            q.drain_into(&mut out);
+            black_box(out.iter().sum::<usize>())
+        });
+    });
+
+    group.bench_function("EventQueue::drain_each", |b| {
+        let q = EventQueue::new();
+        b.iter(|| {
+            produce(&q);
+            let mut sum = 0;
+            q.drain_each(|batch| sum += batch.iter().sum::<usize>());
+            black_box(sum)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_thread_push,
     bench_multi_thread_push,
     bench_drain,
-    bench_produce_then_drain
+    bench_produce_then_drain,
+    bench_steady_state,
+    bench_steady_state_threads
 );
 criterion_main!(benches);

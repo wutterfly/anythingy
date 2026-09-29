@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.2
+
+`EventQueue` draining no longer throws its buffers away, and pushing is faster.
+
+### Added
+
+- `EventQueue::drain_into`: drains into a `Vec` you provide, so it can be reused between calls.
+- `EventQueue::drain_each`: hands the events to a callback one thread's batch at a time, without copying them or allocating. The batches can only be read.
+
+### Changed
+
+- `EventQueue::drain` and the other drain methods leave each thread's buffer in place with its capacity, so the next pushes do not have to allocate again. Buffers that have grown much larger than they are used are trimmed back gradually, but never to nothing.
+- `EventQueue::drain` reserves its result once instead of growing it.
+- `EventQueue::push` is about two to three times faster on a single thread, and slightly faster with several.
+
+### Fixed
+
+- A panic while pushing to an `EventQueue` no longer leaves the thread's buffer locked, which would have made other threads spin forever.
+
 ## 0.3.1
 
 Breaking release: the crate now hosts a set of data structures instead of only `Thing` and its maps.

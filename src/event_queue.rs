@@ -3,7 +3,7 @@
 //!
 //! See [`EventQueue`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
@@ -23,8 +23,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 // thread produced is a normal cache-friendly `Vec` scan rather than
 // chasing pointers through a linked list of individually-allocated
 // nodes. [`drain`](EventQueue::drain) walks every thread's buffer and
-// swaps each one out for a fresh empty `Vec`, in a single atomic
-// operation per thread.
+// takes its contents with one swap-to-null ticket per thread. The
+// buffer's vec is exchanged for an empty one that keeps its capacity (see
+// `drain_each`), so a steady producer does not reallocate after every
+// drain, and no element is copied.
 //
 // The only synchronization on the hot path is between a single thread's
 // own pushes and an occasional `drain` reaching into *that specific
@@ -69,6 +71,24 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 // operations (the buffer's own acquire/release swap) instead of paying
 // for reference counting on every call.
 
+/// Vecs with a capacity up to this many elements are never shrunk.
+const PRUNE_ABOVE: usize = 1024;
+
+/// Trims a drained, emptied vec before it goes back into circulation, so that
+/// one burst of events does not keep a huge allocation alive forever.
+///
+/// `used` is how many events the vec held. A vec is only pruned when it is
+/// larger than [`PRUNE_ABOVE`] and at least four times bigger than it was
+/// used, and then only down to twice what it was used (but never below
+/// `PRUNE_ABOVE`), not to nothing. The gap between the two factors keeps a
+/// vec whose load fluctuates from being shrunk and regrown over and over.
+fn prune<T>(vec: &mut Vec<T>, used: usize) {
+    debug_assert!(vec.is_empty());
+    if vec.capacity() > PRUNE_ABOVE && used.saturating_mul(4) <= vec.capacity() {
+        vec.shrink_to(used.saturating_mul(2).max(PRUNE_ABOVE));
+    }
+}
+
 /// One producer thread's accumulated, not-yet-drained events. Guarded by
 /// a swap-to-null "ticket": whoever holds the non-null pointer has
 /// exclusive access, and puts a (possibly different) vec back when done.
@@ -81,6 +101,19 @@ struct ThreadBuffer<T> {
 
 unsafe impl<T: Send> Send for ThreadBuffer<T> {}
 unsafe impl<T: Send> Sync for ThreadBuffer<T> {}
+
+/// Stores a [`ThreadBuffer`]'s vec back into its slot when dropped.
+struct Restore<'a, T> {
+    slot: &'a AtomicPtr<Vec<T>>,
+    ptr: *mut Vec<T>,
+}
+
+impl<T> Drop for Restore<'_, T> {
+    #[inline]
+    fn drop(&mut self) {
+        self.slot.store(self.ptr, Ordering::Release);
+    }
+}
 
 impl<T> ThreadBuffer<T> {
     fn new() -> Self {
@@ -96,25 +129,36 @@ impl<T> ThreadBuffer<T> {
                 std::hint::spin_loop();
                 continue;
             }
-            let mut vec = unsafe { Box::from_raw(ptr) };
-            vec.push(value);
-            self.slot.store(Box::into_raw(vec), Ordering::Release);
+            // Puts the ticket back when it goes out of scope, also if the
+            // push unwinds, so that other threads are never left spinning.
+            let _restore = Restore {
+                slot: &self.slot,
+                ptr,
+            };
+            // SAFETY: the non-null pointer was swapped out, so this thread
+            // has exclusive access to the vec until `_restore` stores it back.
+            unsafe { (*ptr).push(value) };
             return;
         }
     }
 
-    /// Swaps out whatever has accumulated for a fresh empty `Vec`.
-    fn take(&self) -> Vec<T> {
+    /// Swaps the buffer's vec with `spare`, which should be empty: afterwards
+    /// `spare` holds what has accumulated, and the buffer holds the (empty)
+    /// vec that was passed in, with its capacity. Only the vec headers move,
+    /// no element is copied, and the ticket is held for just the swap.
+    fn swap_out(&self, spare: &mut Vec<T>) {
+        debug_assert!(spare.is_empty());
         loop {
             let ptr = self.slot.swap(ptr::null_mut(), Ordering::Acquire);
             if ptr.is_null() {
                 std::hint::spin_loop();
                 continue;
             }
-            let contents = *unsafe { Box::from_raw(ptr) };
-            self.slot
-                .store(Box::into_raw(Box::new(Vec::new())), Ordering::Release);
-            return contents;
+            // SAFETY: the non-null pointer was swapped out, so this thread
+            // has exclusive access to the vec until it is stored back.
+            unsafe { ptr::swap(ptr, spare) };
+            self.slot.store(ptr, Ordering::Release);
+            return;
         }
     }
 
@@ -301,6 +345,13 @@ static NEXT_QUEUE_ID: AtomicU64 = AtomicU64::new(0);
 /// that push to the queue at the same time. Events left behind by a thread
 /// that has exited stay in the queue until the next `drain`.
 ///
+/// Draining does not make the next pushes allocate again: the buffers keep
+/// their capacity. Buffers that have grown much larger than they are used
+/// (after a burst of events) are trimmed back gradually as they are drained. [`drain`](Self::drain) copies the events into one new
+/// vector, [`drain_into`](Self::drain_into) into one you provide.
+/// [`drain_each`](Self::drain_each) copies nothing and allocates nothing once
+/// warmed up, but only lets you look at the events, one thread's batch at a time.
+///
 /// # Examples
 ///
 /// ```
@@ -326,6 +377,9 @@ pub struct EventQueue<T> {
     id: u64,
     life: Arc<QueueLife>,
     registry_head: AtomicPtr<RegistryNode<T>>,
+    /// An empty vec kept between calls of `drain_each`, so that its capacity
+    /// is not thrown away at the end of each call. Null while a drain uses it.
+    spare: AtomicPtr<Vec<T>>,
 }
 
 unsafe impl<T: Send> Send for EventQueue<T> {}
@@ -353,6 +407,14 @@ thread_local! {
     /// thread owns is [`GUARDS`].
     static LOCAL_CACHE: RefCell<Vec<(u64, *const ())>> = const { RefCell::new(Vec::new()) };
 
+    /// The entry of [`LOCAL_CACHE`] that was used last, checked first. A
+    /// thread that pushes to the same queue over and over (the common case)
+    /// finds its buffer here with one comparison. This is a plain `Cell` of a
+    /// type without a destructor, which makes it much cheaper to access than
+    /// the `RefCell<Vec>` above. `u64::MAX` is not a queue id, so it marks
+    /// the cell as empty.
+    static LAST_USED: Cell<(u64, *const ())> = const { Cell::new((u64::MAX, ptr::null())) };
+
     /// The thread's ownership claims on registry nodes; see [`Guards`].
     /// Consulted only on a [`LOCAL_CACHE`] miss (first push to a queue, or
     /// after eviction), never on the hot path.
@@ -368,6 +430,7 @@ impl<T: Send> EventQueue<T> {
                 alive: Mutex::new(true),
             }),
             registry_head: AtomicPtr::new(ptr::null_mut()),
+            spare: AtomicPtr::new(ptr::null_mut()),
         }
     }
 
@@ -470,16 +533,31 @@ impl<T: Send> EventQueue<T> {
     /// possible from another TLS destructor during thread teardown), two
     /// threads briefly share one buffer, which the buffer's ticket
     /// handles like any other push/push contention.
+    #[inline]
     fn thread_buffer(&self) -> *const ThreadBuffer<T> {
+        // `LAST_USED` has no destructor, so it can be read at any point of a
+        // thread's life, including from another `thread_local!`'s destructor.
+        let (id, ptr) = LAST_USED.get();
+        if id == self.id {
+            return ptr.cast::<ThreadBuffer<T>>();
+        }
+        self.thread_buffer_slow()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn thread_buffer_slow(&self) -> *const ThreadBuffer<T> {
         // `try_with`, not `with`: a push made from another `thread_local!`'s
         // destructor can run after `LOCAL_CACHE` itself has been torn down,
         // and `with` would panic there (aborting the process, since it's
         // inside a TLS destructor). In that case the cache is just skipped
         // and the node is found via `lookup_or_register_thread_buffer`,
         // which is always correct -- the cache is purely an optimization.
-        LOCAL_CACHE
+        let ptr = LOCAL_CACHE
             .try_with(|cache| self.thread_buffer_cached(cache))
-            .unwrap_or_else(|_| self.lookup_or_register_thread_buffer())
+            .unwrap_or_else(|_| self.lookup_or_register_thread_buffer());
+        LAST_USED.set((self.id, ptr.cast::<()>()));
+        ptr
     }
 
     fn thread_buffer_cached(
@@ -525,15 +603,79 @@ impl<T: Send> EventQueue<T> {
     /// [type-level notes on ordering](EventQueue#ordering) for what is not
     /// guaranteed between threads. Events pushed while `drain` runs are
     /// returned by this call or by the next one.
+    ///
+    /// This allocates a new vector on every call. To reuse one, see
+    /// [`drain_into`](Self::drain_into); to avoid copying the events, see
+    /// [`drain_each`](Self::drain_each).
     pub fn drain(&self) -> Vec<T> {
-        let mut all = Vec::new();
+        let mut all = Vec::with_capacity(self.len());
+        self.drain_into(&mut all);
+        all
+    }
+
+    /// Removes every event pushed so far, by every thread, and appends them to
+    /// `out`.
+    ///
+    /// Same as [`drain`](Self::drain), but into a vector you own: clear it and
+    /// pass it again on the next call, and once it has grown big enough,
+    /// draining allocates nothing. The events are still copied into `out`; to
+    /// avoid that, see [`drain_each`](Self::drain_each).
+    pub fn drain_into(&self, out: &mut Vec<T>) {
+        self.drain_batches(|batch| out.append(batch));
+    }
+
+    /// Removes every event pushed so far, and lets `f` look at them one batch
+    /// at a time, without copying or allocating.
+    ///
+    /// There is one batch for each thread that has events. Within a batch the
+    /// events are in the order that thread pushed them. The batch is only
+    /// borrowed: the events are dropped when `f` returns, so this is for
+    /// reading them (or cloning what you want to keep). To take ownership of
+    /// the events, use [`drain`](Self::drain) or [`drain_into`](Self::drain_into).
+    ///
+    /// Unlike those, this does not copy the events, because the batches are
+    /// exchanged with the queue's own buffers instead. The emptied vector goes
+    /// back to the queue for the next batch, so once the buffers have grown to
+    /// their working size, draining allocates nothing.
+    ///
+    /// Producers are only held up for the moment it takes to exchange their
+    /// buffer, not while `f` runs.
+    pub fn drain_each(&self, mut f: impl FnMut(&Vec<T>)) {
+        self.drain_batches(|batch| f(batch));
+    }
+
+    /// Shared by the drain methods: hands every non-empty batch to `f`, which
+    /// may take its events. Whatever `f` leaves is dropped.
+    fn drain_batches(&self, mut f: impl FnMut(&mut Vec<T>)) {
+        // Start from the vec the previous call ended with (if no other drain
+        // is using it right now), so capacity survives from call to call.
+        let kept = self.spare.swap(ptr::null_mut(), Ordering::Acquire);
+        let mut spare = if kept.is_null() {
+            Box::new(Vec::new())
+        } else {
+            // SAFETY: it was created by `Box::into_raw` below, and swapping
+            // it out made this call its only owner.
+            unsafe { Box::from_raw(kept) }
+        };
+
         let mut node = self.registry_head.load(Ordering::Acquire);
         while !node.is_null() {
             let n = unsafe { &*node };
-            all.extend(n.buffer.take());
+            n.buffer.swap_out(&mut spare);
+            if !spare.is_empty() {
+                let used = spare.len();
+                f(&mut spare);
+                spare.clear();
+                prune(&mut spare, used);
+            }
             node = n.next;
         }
-        all
+
+        let old = self.spare.swap(Box::into_raw(spare), Ordering::AcqRel);
+        if !old.is_null() {
+            // A concurrent drain stored one too; keep the newer, free this.
+            drop(unsafe { Box::from_raw(old) });
+        }
     }
 
     /// Returns the number of events currently in the queue.
@@ -592,6 +734,11 @@ impl<T> Drop for EventQueue<T> {
         // middle of touching one, so after this nothing can reach a node.
         *self.life.lock() = false;
 
+        let spare = *self.spare.get_mut();
+        if !spare.is_null() {
+            drop(unsafe { Box::from_raw(spare) });
+        }
+
         let mut node = *self.registry_head.get_mut();
         while !node.is_null() {
             let boxed = unsafe { Box::from_raw(node) };
@@ -618,6 +765,129 @@ mod tests {
             q.push(i);
         }
         assert_eq!(q.drain(), (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn drain_into_appends_and_reuses_the_vec() {
+        let q = EventQueue::new();
+        let mut out = vec![0];
+        q.push(1);
+        q.push(2);
+        q.drain_into(&mut out);
+        assert_eq!(out, [0, 1, 2]);
+        assert!(q.is_empty());
+
+        out.clear();
+        let capacity = out.capacity();
+        q.push(3);
+        q.drain_into(&mut out);
+        assert_eq!(out, [3]);
+        assert_eq!(out.capacity(), capacity);
+    }
+
+    #[test]
+    fn drain_each_hands_over_batches_and_empties_the_queue() {
+        let q = EventQueue::new();
+        q.push(1);
+        q.push(2);
+        std::thread::scope(|s| {
+            s.spawn(|| q.push(3));
+        });
+
+        let mut batches = Vec::new();
+        q.drain_each(|batch| batches.push(batch.clone()));
+        assert!(q.is_empty());
+        batches.sort();
+        assert_eq!(batches, [vec![1, 2], vec![3]]);
+
+        let mut called = false;
+        q.drain_each(|_| called = true);
+        assert!(!called, "empty buffers are not handed out");
+    }
+
+    #[test]
+    fn drain_each_drops_what_the_callback_leaves() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        struct Counted(Arc<AtomicUsize>);
+        impl Drop for Counted {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let q = EventQueue::new();
+        for _ in 0..3 {
+            q.push(Counted(Arc::clone(&drops)));
+        }
+        q.drain_each(|batch| assert_eq!(batch.len(), 3));
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn oversized_buffers_are_pruned_but_not_to_nothing() {
+        let q = EventQueue::new();
+        let spare_capacity =
+            |q: &EventQueue<u32>| unsafe { (*q.spare.load(Ordering::Acquire)).capacity() };
+
+        // A burst grows the buffer far beyond what is needed later.
+        for i in 0..8 * PRUNE_ABOVE as u32 {
+            q.push(i);
+        }
+        q.drain_each(|_| {});
+        // The first small drain swaps the big vec into the buffer, the second
+        // one takes it out again as a batch that was barely used.
+        for _ in 0..2 {
+            q.push(1);
+            q.drain_each(|batch| assert_eq!(batch.len(), 1));
+        }
+
+        let kept = spare_capacity(&q);
+        assert!(kept < 8 * PRUNE_ABOVE, "not pruned: {kept}");
+        assert!(kept >= PRUNE_ABOVE, "pruned to nothing: {kept}");
+    }
+
+    #[test]
+    fn prune_policy() {
+        let vec_with = |cap: usize| Vec::<u8>::with_capacity(cap);
+
+        // Small vecs are left alone, however little they were used.
+        let mut v = vec_with(PRUNE_ABOVE);
+        prune(&mut v, 0);
+        assert_eq!(v.capacity(), PRUNE_ABOVE);
+
+        // Well used: left alone.
+        let mut v = vec_with(8 * PRUNE_ABOVE);
+        prune(&mut v, 3 * PRUNE_ABOVE);
+        assert_eq!(v.capacity(), 8 * PRUNE_ABOVE);
+
+        // Barely used: shrunk to twice the use, but not below the floor.
+        let mut v = vec_with(8 * PRUNE_ABOVE);
+        prune(&mut v, 3 * PRUNE_ABOVE / 4);
+        assert!((PRUNE_ABOVE..8 * PRUNE_ABOVE).contains(&v.capacity()));
+        let mut v = vec_with(8 * PRUNE_ABOVE);
+        prune(&mut v, PRUNE_ABOVE);
+        assert!(v.capacity() >= 2 * PRUNE_ABOVE && v.capacity() < 8 * PRUNE_ABOVE);
+    }
+
+    #[test]
+    fn drain_each_circulates_capacity_instead_of_reallocating() {
+        let q = EventQueue::new();
+        let capacity = |q: &EventQueue<i32>| {
+            let node = unsafe { &*q.registry_head.load(Ordering::Acquire) };
+            unsafe { (*node.buffer.slot.load(Ordering::Acquire)).capacity() }
+        };
+
+        q.push(0);
+        q.drain_each(|_| {});
+        for i in 0..100 {
+            q.push(i);
+        }
+        q.drain_each(|batch| assert_eq!(batch.len(), 100));
+        // The buffer got the emptied vec from the previous call back, not a
+        // fresh zero-capacity one.
+        let after = capacity(&q);
+        assert!(after >= 4, "capacity was thrown away: {after}");
+        assert!(q.is_empty());
     }
 
     #[test]
