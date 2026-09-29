@@ -1,42 +1,58 @@
-//! # Anythingy
-//! **This is a work-in-progress project and not for production use.**
+//! Collections and containers that make different space/time trade-offs than
+//! the ones in `std::collections`.
 //!
-//! A library for dynamic typing.
+//! | Type | What it is |
+//! |---|---|
+//! | [`Thing`] | A type-erased value, like `Box<dyn Any>`, that stores small values inline |
+//! | [`TokenStore`] | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
+//! | [`InlineVec`] | A vector that keeps its first few elements inline and only allocates beyond that |
+//! | [`LinearMap`], [`LinearSet`] | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
+//! | `ThingMap`, `SyncThingMap` | One value per type, looked up by the type (the second is thread-safe) |
+//! | `EventQueue` | A multi-producer queue that is drained in batches |
 //!
+//! # Features and `no_std`
 //!
-//! It's main feature is the [`Thing`] type, that works similar to [`Box<dyn Any>`][std::any::Any], but can be sized at compile time.
-//! Additional type maps for storing objects of different types are provided:
+//! The crate is `no_std`-compatible and only needs `alloc`. The default `std`
+//! feature adds the types that need the standard library (`ThingMap`,
+//! `SyncThingMap` and `EventQueue`). To use the rest without `std`:
 //!
-//! * [`AnyMap`] using a [`HashMap`][std::collections::hash_map::HashMap] for storing a large number of different types.
-//! * [`SmallAnyMap`] using a [`Vec`] for storing a small number of different types.
-//!
-//! # Example
-//! ```rust
-//! # use anythingy::Thing;
-//! # fn main() {
-//!    let number_thing: Thing<24> = Thing::new(42u64);
-//!    let sting_thing: Thing<24> = Thing::new(String::from("Hello there"));
-//!    let bytes_thing: Thing<24> = Thing::new(Vec::from(b"so uncivilized"));
-//!
-//!    let number = number_thing.get::<u64>();
-//!    assert_eq!(number, 42);
-//!
-//!    let string = sting_thing.get::<String>();
-//!    assert_eq!(&string, "Hello there");
-//!
-//!    let bytes = bytes_thing.get::<Vec<u8>>();
-//!    assert_eq!(&bytes, b"so uncivilized");
-//! # }
+//! ```toml
+//! anythingy = { version = "0.3", default-features = false }
 //! ```
-
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod map;
-mod small;
-mod thing;
+extern crate alloc;
 
-pub use map::AnyMap;
-pub use small::SmallAnyMap;
-pub use thing::{Thing, DEFAULT_THING_SIZE};
+#[cfg(feature = "std")]
+pub mod event_queue;
+pub mod inline_vec;
+pub mod linear_map;
+pub mod linear_set;
+#[cfg(feature = "std")]
+pub mod sync_thing_map;
+pub mod thing;
+#[cfg(feature = "std")]
+pub mod thing_map;
+pub mod token_store;
+
+#[cfg(feature = "std")]
+pub use event_queue::EventQueue;
+pub use inline_vec::InlineVec;
+pub use linear_map::LinearMap;
+pub use linear_set::LinearSet;
+#[cfg(feature = "std")]
+pub use sync_thing_map::SyncThingMap;
+pub use thing::Thing;
+#[cfg(feature = "std")]
+pub use thing_map::ThingMap;
+pub use token_store::{Token, TokenStore};
+
+// Compiles and runs the code in the README as a doctest, without adding it
+// to the crate documentation.
+#[cfg(all(doctest, feature = "std"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

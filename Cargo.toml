@@ -1,21 +1,70 @@
 [package]
 name = "anythingy"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
-description = "A library for dynamic typing."
+rust-version = "1.88"
+description = "Collections with different space/time trade-offs: a type-erased Thing, a generational TokenStore, InlineVec, LinearMap and LinearSet, a type map and an event queue."
 license = "MIT"
 repository = "https://github.com/wutterfly/anythingy"
+readme = "README.md"
+keywords = ["data-structures", "collections", "type-map", "generational-index", "no-std"]
+categories = ["data-structures", "no-std"]
+exclude = [".github/"]
 
-[dependencies]
-
+[features]
+default = ["std"]
+# Enables `EventQueue`, which needs threads, thread-locals and `Mutex`.
+# Everything else works with only `core` and `alloc`.
+std = []
 
 [dev-dependencies]
-criterion = "0.8.2"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+crossbeam-channel = "0.5.17"
+slotmap = "1.1.1"
+smallvec = "1.16.2"
 
 [[bench]]
-name = "map"
+name = "linear_map"
 harness = false
 
 [[bench]]
-name = "small_map"
+name = "inline_vec"
 harness = false
+
+[[bench]]
+name = "linear_set"
+harness = false
+
+[[bench]]
+name = "event_queue"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "thing"
+harness = false
+
+[[bench]]
+name = "thing_map"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "token_store"
+harness = false
+
+[[example]]
+name = "event_queue"
+required-features = ["std"]
+
+[[example]]
+name = "thing_map"
+required-features = ["std"]
+
+[[example]]
+name = "sync_thing_map"
+required-features = ["std"]
+
+[profile.bench]
+lto = "fat"
+codegen-units = 1

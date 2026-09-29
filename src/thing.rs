@@ -1,39 +1,83 @@
-use std::{
+//! A type-erased value that stores small values inline.
+//!
+//! See [`Thing`].
+
+use alloc::boxed::Box;
+use core::{
     any::TypeId,
     cell::UnsafeCell,
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
 };
 
-/// Default size of [`Thing`][crate::Thing].
-/// Chosen to be 3x [`std::mem::size_of::<usize>()`], to facilitate [`Vec`]/[`String`] without boxing them, to prevent double pointers.
-pub const DEFAULT_THING_SIZE: usize = std::mem::size_of::<usize>() * 3;
+/// Default size of [`Thing`].
+/// Chosen to be 3x `size_of::<usize>()`, to facilitate `Vec`/`String` without boxing them, to prevent double pointers.
+pub const DEFAULT_THING_SIZE: usize = core::mem::size_of::<usize>() * 3;
 
-/// A Structure for storing type-erased values. Similar to [`Box<dyn Any>`][std::any::Any] it can store values of any type.
+/// A structure for storing type-erased values. Similar to [`Box<dyn Any>`][core::any::Any] it can store values of any type.
 ///
-/// What makes this structure special is, that the `SIZE` of Thing can be specified.
-/// For values of type `T`, where size of `T` is smaller/equal to `SIZE`, no additional allocation is needed.
+/// What makes this structure special is that the `SIZE` of Thing can be specified.
+/// For values of type `T`, where size of `T` is smaller than or equal to `SIZE`, no additional allocation is needed.
 ///
-/// For types `T` that are greater then `SIZE`, the value gets boxed.
+/// For types `T` that are greater than `SIZE`, the value gets boxed.
 ///
-/// For types `T` which alignment is greater then 8, the value gets also boxed.
+/// For types `T` which alignment is greater than 8, the value gets also boxed.
 ///
 /// # Send / Sync
-/// By default, `Thing` is not `Send` or `Sync`, since it contains raw pointers and manual drop glue.
-/// To use `Thing` in a  `Send`/`Sync` manner, wrap it in a struct that implements the appropriate traits, and enforce construction only with appropriate constrains.
 ///
+/// A `Thing` is neither `Send` nor `Sync`, because it can hold any type,
+/// including ones that are not thread-safe. To share type-erased values
+/// between threads, use `SyncThingMap` (available with the `std` feature),
+/// which only accepts `Send + Sync` values.
 ///
-/// # Safety notes
-/// - The internals write `T` into a byte buffer and later read it back. The code ensures that types with
-///   alignment > 8 are boxed, and `Thing` is repr(align(8)), so alignment requirements for unboxed values are satisfied.
-/// - Conversions are performed with explicit `ptr::write` / `ptr::read` into a `MaybeUninit<[u8; SIZE]>` backing buffer,
-///   avoiding reading inactive union fields.
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<anythingy::Thing<24>>();
+/// ```
+///
+/// ```compile_fail,E0277
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<anythingy::Thing<24>>();
+/// ```
+///
+/// # Unchecked access
+/// [`get`](Self::get), [`get_ref`](Self::get_ref) and [`get_mut`](Self::get_mut)
+/// check the type first and panic on a mismatch; the `try_` variants return
+/// `None`. If the type is already known, the `unsafe` [`get_unchecked`](Self::get_unchecked),
+/// [`get_ref_unchecked`](Self::get_ref_unchecked) and
+/// [`get_mut_unchecked`](Self::get_mut_unchecked) skip the check, like the
+/// `downcast_unchecked` methods on `dyn Any`. A wrong type is undefined behavior.
+///
+// Implementation notes:
+// - The internals write `T` into a byte buffer and later read it back. The code ensures that types with
+//   alignment > 8 are boxed, and `Thing` is repr(align(8)), so alignment requirements for unboxed values are satisfied.
+// - Conversions are performed with explicit `ptr::write` / `ptr::read` into a `MaybeUninit<[u8; SIZE]>` backing buffer,
+//   avoiding reading inactive union fields.
 #[derive(Debug)]
 #[repr(align(8))]
 pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
     id: TypeId,
+    raw: RawThing<SIZE>,
+}
+
+/// The storage of a [`Thing`] without its `TypeId`: a type-erased value and
+/// the function that drops it.
+///
+/// It cannot check types, so all of its accessors are `unsafe`: the caller
+/// has to know the type. This is what a container that already tracks the
+/// type elsewhere (like `ThingMap`, whose key is the `TypeId`) stores, so it
+/// does not pay for a second copy of the id.
+///
+/// In debug builds it also remembers the `TypeId`, so the unchecked accessors
+/// can assert that the caller's claim is right. Release builds do not have
+/// that field, so a `RawThing` is 16 bytes smaller than a `Thing` there.
+#[derive(Debug)]
+#[repr(align(8))]
+pub(crate) struct RawThing<const SIZE: usize> {
     drop: fn(UnsafeCell<AlignedBytes<SIZE>>),
     data: UnsafeCell<AlignedBytes<SIZE>>,
+    #[cfg(debug_assertions)]
+    debug_id: TypeId,
     _not_send_sync: PhantomData<*const ()>,
 }
 
@@ -42,57 +86,18 @@ pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
 struct AlignedBytes<const SIZE: usize>([MaybeUninit<u8>; SIZE]);
 
 impl<const SIZE: usize> Thing<SIZE> {
-    /// Creates a new `Thing` from generic type `T`. Uses the boxed value, if size of `T` is bigger then `SIZE`.
+    /// Creates a new `Thing` from generic type `T`. Uses the boxed value, if size of `T` is bigger than `SIZE`.
     ///
-    /// If the alignment of type `T` is greater then 8, `T` gets also boxed.
+    /// If the alignment of type `T` is greater than 8, `T` gets also boxed.
     ///
     /// # Panics
-    /// Panics, if size of `T` is greater then `SIZE`, but `SIZE` is smaller then size of `Box<T>`.
+    /// Panics, if size of `T` is greater than `SIZE`, but `SIZE` is smaller than size of `Box<T>`.
     #[inline]
     #[must_use]
     pub fn new<T: 'static>(t: T) -> Self {
-        // save type
-        let id = TypeId::of::<T>();
-
-        if Self::boxed::<T>() {
-            // check that Thing can hold at least a Box.
-            assert!(
-                Self::fitting::<Box<T>>(),
-                "Thing<SIZE> too small to hold Box<T>"
-            );
-
-            // convert type from bytes (Box<T>)
-            let convert = Convert::new(Box::new(t));
-
-            // convert type to bytes
-            let data = convert.bytes();
-
-            return Self {
-                id,
-                drop: Self::drop_glue::<T>,
-                data,
-                _not_send_sync: PhantomData,
-            };
-        }
-
-        // convert type from bytes (T)
-        let convert = Convert::new(t);
-
-        // convert type to bytes
-        let data = convert.bytes();
-
-        // get drop glue
-        let drop = if std::mem::needs_drop::<T>() {
-            Self::drop_glue::<T>
-        } else {
-            Self::empty_drop_glue
-        };
-
         Self {
-            id,
-            drop,
-            data,
-            _not_send_sync: PhantomData,
+            id: TypeId::of::<T>(),
+            raw: RawThing::new(t),
         }
     }
 
@@ -102,27 +107,12 @@ impl<const SIZE: usize> Thing<SIZE> {
     /// Panics if given type and original type do not match.
     #[inline]
     #[must_use]
-    pub fn get<T: 'static>(mut self) -> T {
+    pub fn get<T: 'static>(self) -> T {
         // check that types are matching
         assert!(self.is_type::<T>());
 
-        // Prevent double-drop: mark drop as empty; we'll move the data out ourselves.
-        self.drop = Self::empty_drop_glue;
-
-        let data = unsafe { self.move_data_uninit() };
-
-        if Self::boxed::<T>() {
-            // convert type from bytes
-            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
-
-            // move value out of box
-            return *convert.get();
-        }
-
-        // convert type from bytes
-        let convert = Convert::<SIZE, T>::from_bytes(data);
-
-        convert.get()
+        // SAFETY: the type was just checked.
+        unsafe { self.get_unchecked() }
     }
 
     /// Returns a reference to the original type of `Thing`, if given type and original type match.
@@ -135,12 +125,8 @@ impl<const SIZE: usize> Thing<SIZE> {
         // check that types are matching
         assert!(self.is_type::<T>());
 
-        if Self::boxed::<T>() {
-            // For boxed case the stored value is a `Box<T>`; get_ref returns &Box<T> then `.as_ref()` to get &T.
-            return Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref();
-        }
-
-        Convert::<SIZE, T>::get_ref(&self.data)
+        // SAFETY: the type was just checked.
+        unsafe { self.get_ref_unchecked() }
     }
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
@@ -153,40 +139,22 @@ impl<const SIZE: usize> Thing<SIZE> {
         // check that types are matching
         assert!(self.is_type::<T>());
 
-        if Self::boxed::<T>() {
-            return Convert::<SIZE, Box<T>>::get_mut(&mut self.data).as_mut();
-        }
-
-        Convert::<SIZE, T>::get_mut(&mut self.data)
+        // SAFETY: the type was just checked.
+        unsafe { self.get_mut_unchecked() }
     }
 
     /// Returns the original type of `Thing`, if given type and original type match.
     /// Returns `None`, if types don't match.
     #[inline]
     #[must_use]
-    pub fn try_get<T: 'static>(mut self) -> Option<T> {
+    pub fn try_get<T: 'static>(self) -> Option<T> {
         // check that types are matching
         if !self.is_type::<T>() {
             return None;
         }
 
-        // Prevent double-drop
-        self.drop = Self::empty_drop_glue;
-
-        let data = unsafe { self.move_data_uninit() };
-
-        if Self::boxed::<T>() {
-            // convert type from bytes
-            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
-
-            // move value out of box
-            return Some(*convert.get());
-        }
-
-        // convert type from bytes
-        let convert = Convert::<SIZE, T>::from_bytes(data);
-
-        Some(convert.get())
+        // SAFETY: the type was just checked.
+        Some(unsafe { self.get_unchecked() })
     }
 
     /// Returns a reference to the original type of `Thing`, if given type and original type match.
@@ -199,11 +167,8 @@ impl<const SIZE: usize> Thing<SIZE> {
             return None;
         }
 
-        if Self::boxed::<T>() {
-            return Some(Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref());
-        }
-
-        Some(Convert::<SIZE, T>::get_ref(&self.data))
+        // SAFETY: the type was just checked.
+        Some(unsafe { self.get_ref_unchecked() })
     }
 
     /// Returns a mutable reference to the original type of `Thing`, if given type and original type match.
@@ -216,11 +181,117 @@ impl<const SIZE: usize> Thing<SIZE> {
             return None;
         }
 
-        if Self::boxed::<T>() {
-            return Some(Convert::<SIZE, Box<T>>::get_mut(&mut self.data).as_mut());
-        }
+        // SAFETY: the type was just checked.
+        Some(unsafe { self.get_mut_unchecked() })
+    }
 
-        Some(Convert::<SIZE, T>::get_mut(&mut self.data))
+    /// Returns the original value without checking that `T` is its type.
+    ///
+    /// The unchecked counterpart of [`get`](Self::get), like the
+    /// `downcast_unchecked` methods on `dyn Any`: it skips the type check, so
+    /// it is a little faster and never panics.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be exactly the type this `Thing` was created with, that is
+    /// [`is_type::<T>()`](Self::is_type) must be `true`. Otherwise the stored
+    /// bytes are reinterpreted as a `T`, which is undefined behavior.
+    ///
+    /// Debug builds assert the type and panic on a mismatch instead of
+    /// proceeding, but release builds do not check.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anythingy::Thing;
+    ///
+    /// let thing = Thing::<24>::new(String::from("hello"));
+    /// // The caller knows this is a `String`.
+    /// let text: String = unsafe { thing.get_unchecked() };
+    /// assert_eq!(text, "hello");
+    /// ```
+    #[inline]
+    #[must_use]
+    pub unsafe fn get_unchecked<T: 'static>(self) -> T {
+        debug_assert!(
+            self.is_type::<T>(),
+            "get_unchecked called with a type that does not match the stored one"
+        );
+
+        // SAFETY: the caller guarantees that `T` is the stored type.
+        unsafe { self.raw.get_unchecked::<T>() }
+    }
+
+    /// Returns a reference to the original value without checking that `T` is
+    /// its type.
+    ///
+    /// The unchecked counterpart of [`get_ref`](Self::get_ref), like
+    /// `downcast_ref_unchecked` on `dyn Any`.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be exactly the type this `Thing` was created with, that is
+    /// [`is_type::<T>()`](Self::is_type) must be `true`. Otherwise the stored
+    /// bytes are reinterpreted as a `T`, which is undefined behavior.
+    ///
+    /// Debug builds assert the type and panic on a mismatch instead of
+    /// proceeding, but release builds do not check.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anythingy::Thing;
+    ///
+    /// let thing = Thing::<24>::new(42u32);
+    /// let value: &u32 = unsafe { thing.get_ref_unchecked() };
+    /// assert_eq!(*value, 42);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub unsafe fn get_ref_unchecked<T: 'static>(&self) -> &T {
+        debug_assert!(
+            self.is_type::<T>(),
+            "get_ref_unchecked called with a type that does not match the stored one"
+        );
+
+        // SAFETY: the caller guarantees that `T` is the stored type.
+        unsafe { self.raw.get_ref_unchecked::<T>() }
+    }
+
+    /// Returns a mutable reference to the original value without checking
+    /// that `T` is its type.
+    ///
+    /// The unchecked counterpart of [`get_mut`](Self::get_mut), like
+    /// `downcast_mut_unchecked` on `dyn Any`.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be exactly the type this `Thing` was created with, that is
+    /// [`is_type::<T>()`](Self::is_type) must be `true`. Otherwise the stored
+    /// bytes are reinterpreted as a `T`, which is undefined behavior.
+    ///
+    /// Debug builds assert the type and panic on a mismatch instead of
+    /// proceeding, but release builds do not check.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anythingy::Thing;
+    ///
+    /// let mut thing = Thing::<24>::new(vec![1, 2]);
+    /// unsafe { thing.get_mut_unchecked::<Vec<i32>>() }.push(3);
+    /// assert_eq!(thing.get_ref::<Vec<i32>>(), &[1, 2, 3]);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub unsafe fn get_mut_unchecked<T: 'static>(&mut self) -> &mut T {
+        debug_assert!(
+            self.is_type::<T>(),
+            "get_mut_unchecked called with a type that does not match the stored one"
+        );
+
+        // SAFETY: the caller guarantees that `T` is the stored type.
+        unsafe { self.raw.get_mut_unchecked::<T>() }
     }
 
     /// Returns true, if erased type is equal to given type.
@@ -232,7 +303,7 @@ impl<const SIZE: usize> Thing<SIZE> {
 
     /// Returns true, if `T` can be made into a `Thing`.
     ///
-    /// Returns false, if `SIZE` is smaller then a needed `Box<T>`.
+    /// Returns false, if `SIZE` is smaller than a needed `Box<T>`.
     #[inline]
     #[must_use]
     pub const fn fitting<T: 'static>() -> bool {
@@ -246,9 +317,9 @@ impl<const SIZE: usize> Thing<SIZE> {
     #[inline]
     #[must_use]
     pub const fn size_requirement<T: 'static>() -> usize {
-        let size = std::mem::size_of::<T>();
-        let boxed = std::mem::size_of::<Box<T>>();
-        let align = std::mem::align_of::<T>();
+        let size = core::mem::size_of::<T>();
+        let boxed = core::mem::size_of::<Box<T>>();
+        let align = core::mem::align_of::<T>();
 
         // value always has to be boxed if align is greater then 8
         if align > 8 || size > boxed {
@@ -263,8 +334,8 @@ impl<const SIZE: usize> Thing<SIZE> {
     #[inline]
     #[must_use]
     pub const fn size_requirement_unboxed<T: 'static>() -> Option<usize> {
-        let size = std::mem::size_of::<T>();
-        let align = std::mem::align_of::<T>();
+        let size = core::mem::size_of::<T>();
+        let align = core::mem::align_of::<T>();
 
         // value always has to be boxed if align is greater then 8
         if align > 8 {
@@ -284,17 +355,144 @@ impl<const SIZE: usize> Thing<SIZE> {
             true
         }
     }
+}
+
+impl<const SIZE: usize> RawThing<SIZE> {
+    /// Creates the storage for `t`. Uses a boxed value if `T` is bigger than
+    /// `SIZE` or over-aligned; see [`Thing::new`].
+    ///
+    /// # Panics
+    /// Panics, if size of `T` is greater than `SIZE`, but `SIZE` is smaller than size of `Box<T>`.
+    #[inline]
+    pub(crate) fn new<T: 'static>(t: T) -> Self {
+        if Thing::<SIZE>::boxed::<T>() {
+            // check that the storage can hold at least a Box.
+            assert!(
+                Thing::<SIZE>::fitting::<Box<T>>(),
+                "Thing<SIZE> too small to hold Box<T>"
+            );
+
+            // convert type from bytes (Box<T>)
+            let convert = Convert::new(Box::new(t));
+
+            // convert type to bytes
+            let data = convert.bytes();
+
+            return Self::from_parts(Self::drop_glue::<T>, data, TypeId::of::<T>());
+        }
+
+        // convert type from bytes (T)
+        let convert = Convert::new(t);
+
+        // convert type to bytes
+        let data = convert.bytes();
+
+        // get drop glue
+        let drop = if core::mem::needs_drop::<T>() {
+            Self::drop_glue::<T>
+        } else {
+            Self::empty_drop_glue
+        };
+
+        Self::from_parts(drop, data, TypeId::of::<T>())
+    }
+
+    #[inline]
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+    fn from_parts(
+        drop: fn(UnsafeCell<AlignedBytes<SIZE>>),
+        data: UnsafeCell<AlignedBytes<SIZE>>,
+        id: TypeId,
+    ) -> Self {
+        Self {
+            drop,
+            data,
+            #[cfg(debug_assertions)]
+            debug_id: id,
+            _not_send_sync: PhantomData,
+        }
+    }
+
+    /// In debug builds, asserts that the stored value is a `T`.
+    #[inline]
+    fn debug_check<T: 'static>(&self) {
+        #[cfg(debug_assertions)]
+        assert!(
+            self.debug_id == TypeId::of::<T>(),
+            "RawThing accessed with a type that does not match the stored one"
+        );
+    }
+
+    /// Returns the stored value.
+    ///
+    /// # Safety
+    /// `T` must be exactly the type this storage was created with.
+    #[inline]
+    pub(crate) unsafe fn get_unchecked<T: 'static>(mut self) -> T {
+        self.debug_check::<T>();
+
+        // Prevent double-drop: mark drop as empty; we'll move the data out ourselves.
+        self.drop = Self::empty_drop_glue;
+
+        // SAFETY: the buffer is moved out exactly once, and `drop` was just
+        // replaced by a no-op, so nothing reads or drops it again.
+        let data = unsafe { self.move_data_uninit() };
+
+        if Thing::<SIZE>::boxed::<T>() {
+            // convert type from bytes
+            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
+
+            // move value out of box
+            return *convert.get();
+        }
+
+        // convert type from bytes
+        let convert = Convert::<SIZE, T>::from_bytes(data);
+
+        convert.get()
+    }
+
+    /// Returns a reference to the stored value.
+    ///
+    /// # Safety
+    /// `T` must be exactly the type this storage was created with.
+    #[inline]
+    pub(crate) unsafe fn get_ref_unchecked<T: 'static>(&self) -> &T {
+        self.debug_check::<T>();
+
+        if Thing::<SIZE>::boxed::<T>() {
+            // For boxed case the stored value is a `Box<T>`; get_ref returns &Box<T> then `.as_ref()` to get &T.
+            return Convert::<SIZE, Box<T>>::get_ref(&self.data).as_ref();
+        }
+
+        Convert::<SIZE, T>::get_ref(&self.data)
+    }
+
+    /// Returns a mutable reference to the stored value.
+    ///
+    /// # Safety
+    /// `T` must be exactly the type this storage was created with.
+    #[inline]
+    pub(crate) unsafe fn get_mut_unchecked<T: 'static>(&mut self) -> &mut T {
+        self.debug_check::<T>();
+
+        if Thing::<SIZE>::boxed::<T>() {
+            return Convert::<SIZE, Box<T>>::get_mut(&mut self.data).as_mut();
+        }
+
+        Convert::<SIZE, T>::get_mut(&mut self.data)
+    }
 
     /// This is unsafe, because it leaves self.data in an invalid state,
     const unsafe fn move_data_uninit(&mut self) -> UnsafeCell<AlignedBytes<SIZE>> {
         let fill = UnsafeCell::new(AlignedBytes([MaybeUninit::<u8>::uninit(); SIZE]));
 
-        std::mem::replace(&mut self.data, fill)
+        core::mem::replace(&mut self.data, fill)
     }
 
     #[inline]
     fn drop_glue<T: 'static>(data: UnsafeCell<AlignedBytes<SIZE>>) {
-        if Self::boxed::<T>() {
+        if Thing::<SIZE>::boxed::<T>() {
             // convert type from bytes (Box<T>)
             let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
 
@@ -307,7 +505,7 @@ impl<const SIZE: usize> Thing<SIZE> {
         // Sanity check: if the type would be stored unboxed, its alignment must fit into our buffer.
         // If this fails in debug builds it indicates a mismatch between `boxed::<T>()` and actual alignment.
         debug_assert!(
-            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
             "alignment of T exceeds alignment of Thing storage; T should have been boxed"
         );
 
@@ -322,7 +520,7 @@ impl<const SIZE: usize> Thing<SIZE> {
     const fn empty_drop_glue<const S: usize>(_: UnsafeCell<AlignedBytes<S>>) {}
 }
 
-impl<const SIZE: usize> std::ops::Drop for Thing<SIZE> {
+impl<const SIZE: usize> core::ops::Drop for RawThing<SIZE> {
     #[inline]
     fn drop(&mut self) {
         // Take ownership of the bytes buffer and call the stored drop function.
@@ -349,7 +547,7 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
 
         // Debug-time alignment check: types that would be stored unboxed must satisfy the buffer's alignment.
         debug_assert!(
-            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
             "alignment of T exceeds alignment of Thing storage; consider boxing T"
         );
 
@@ -371,7 +569,7 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
 
         unsafe {
             // Write the value into the buffer. This avoids creating an intermediate active union field.
-            std::ptr::write(ptr_to_t, value);
+            core::ptr::write(ptr_to_t, value);
         }
 
         conv
@@ -403,21 +601,21 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
 
         // Debug-time alignment check: ensure the stored T is properly aligned for an aligned read.
         debug_assert!(
-            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
             "get: alignment of T ({}) exceeds buffer alignment ({}); T should have been boxed",
-            std::mem::align_of::<T>(),
-            std::mem::align_of::<AlignedBytes<SIZE>>()
+            core::mem::align_of::<T>(),
+            core::mem::align_of::<AlignedBytes<SIZE>>()
         );
 
         // Use aligned read now that we assert alignment in debug; this is potentially faster on some targets.
-        unsafe { std::ptr::read(ptr_to_t.cast_const()) }
+        unsafe { core::ptr::read(ptr_to_t.cast_const()) }
     }
 
     #[inline]
     fn get_ref(data: &UnsafeCell<AlignedBytes<SIZE>>) -> &T {
         // Debug-time alignment check: ensure the stored T would be properly aligned for reference creation.
         debug_assert!(
-            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
             "alignment of T exceeds alignment of Thing storage; T should have been boxed"
         );
 
@@ -429,21 +627,21 @@ impl<const SIZE: usize, T> Convert<SIZE, T> {
     fn get_mut(data: &mut UnsafeCell<AlignedBytes<SIZE>>) -> &mut T {
         // Debug-time alignment check: ensure the stored T would be properly aligned for mutable reference creation.
         debug_assert!(
-            std::mem::align_of::<T>() <= std::mem::align_of::<AlignedBytes<SIZE>>(),
+            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
             "alignment of T exceeds alignment of Thing storage; T should have been boxed"
         );
 
-        let ptr_to_t = std::ptr::from_mut::<AlignedBytes<SIZE>>(data.get_mut())
+        let ptr_to_t = core::ptr::from_mut::<AlignedBytes<SIZE>>(data.get_mut())
             .cast::<u8>()
             .cast::<T>();
         unsafe { &mut *ptr_to_t }
     }
 }
 
-impl<const SIZE: usize, T> std::fmt::Debug for Convert<SIZE, T> {
+impl<const SIZE: usize, T> core::fmt::Debug for Convert<SIZE, T> {
     #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = std::any::type_name::<T>();
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = core::any::type_name::<T>();
         let bytes = unsafe { &*(self.bytes.get().cast_const()) };
         write!(f, "{name}: {bytes:?}")
     }
@@ -700,30 +898,267 @@ mod tests {
         use super::Thing;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        // Each test has its own counter and its own type that increments it:
+        // tests run in parallel, so they must not share one.
+        static UNBOXED_DROPS: AtomicUsize = AtomicUsize::new(0);
+        static BOXED_DROPS: AtomicUsize = AtomicUsize::new(0);
 
-        struct CountDrop;
-        impl Drop for CountDrop {
+        struct UnboxedCountDrop;
+        impl Drop for UnboxedCountDrop {
             fn drop(&mut self) {
-                DROPS.fetch_add(1, Ordering::SeqCst);
+                UNBOXED_DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[repr(align(16))]
+        struct BoxedCountDrop;
+        impl Drop for BoxedCountDrop {
+            fn drop(&mut self) {
+                BOXED_DROPS.fetch_add(1, Ordering::SeqCst);
             }
         }
 
         #[test]
         fn unboxed_drop_runs_once() {
-            DROPS.store(0, Ordering::SeqCst);
-            drop(Thing::<32>::new(CountDrop));
-            assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+            drop(Thing::<32>::new(UnboxedCountDrop));
+            assert_eq!(UNBOXED_DROPS.load(Ordering::SeqCst), 1);
         }
 
         #[test]
-        fn boxed_drop_runs() {
-            #[repr(align(16))]
-            struct AlignDrop(CountDrop);
+        fn boxed_drop_runs_once() {
+            // Alignment above 8, so it is boxed.
+            assert!(Thing::<32>::boxed::<BoxedCountDrop>());
+            drop(Thing::<32>::new(BoxedCountDrop));
+            assert_eq!(BOXED_DROPS.load(Ordering::SeqCst), 1);
+        }
+    }
 
-            DROPS.store(0, Ordering::SeqCst);
-            drop(Thing::<32>::new(AlignDrop(CountDrop)));
-            assert!(DROPS.load(Ordering::SeqCst) >= 1);
+    mod unchecked {
+        use super::Thing;
+        use std::rc::Rc;
+
+        #[repr(align(16))]
+        #[derive(Debug, PartialEq)]
+        struct Aligned(u32);
+
+        #[test]
+        fn get_unchecked_round_trips_inline_and_boxed_values() {
+            // SAFETY (all `unsafe` below): the type argument always matches
+            // the type the `Thing` was created with.
+            let inline: Thing<24> = Thing::new(String::from("inline"));
+            assert_eq!(unsafe { inline.get_unchecked::<String>() }, "inline");
+
+            let big: Thing<24> = Thing::new([7u64; 16]); // too large: boxed
+            assert!(Thing::<24>::boxed::<[u64; 16]>());
+            assert_eq!(unsafe { big.get_unchecked::<[u64; 16]>() }, [7u64; 16]);
+
+            let aligned: Thing<32> = Thing::new(Aligned(5)); // alignment above 8: boxed
+            assert!(Thing::<32>::boxed::<Aligned>());
+            assert_eq!(unsafe { aligned.get_unchecked::<Aligned>() }, Aligned(5));
+
+            let small: Thing<8> = Thing::new(3u8);
+            assert_eq!(unsafe { small.get_unchecked::<u8>() }, 3);
+
+            let zst: Thing<0> = Thing::new(());
+            let () = unsafe { zst.get_unchecked::<()>() };
+        }
+
+        #[test]
+        fn get_ref_and_mut_unchecked_see_and_change_the_same_value() {
+            let mut inline: Thing<24> = Thing::new(vec![1, 2]);
+            let mut boxed: Thing<8> = Thing::new(vec![1, 2]); // Vec is 24 bytes: boxed
+            assert!(Thing::<8>::boxed::<Vec<i32>>());
+
+            unsafe {
+                inline.get_mut_unchecked::<Vec<i32>>().push(3);
+                boxed.get_mut_unchecked::<Vec<i32>>().push(3);
+                assert_eq!(inline.get_ref_unchecked::<Vec<i32>>(), &[1, 2, 3]);
+                assert_eq!(boxed.get_ref_unchecked::<Vec<i32>>(), &[1, 2, 3]);
+            }
+            // The checked accessors agree.
+            assert_eq!(inline.get_ref::<Vec<i32>>(), &[1, 2, 3]);
+            assert_eq!(boxed.get_ref::<Vec<i32>>(), &[1, 2, 3]);
+        }
+
+        #[test]
+        fn unchecked_accessors_match_the_checked_ones() {
+            let thing: Thing<24> = Thing::new(42u64);
+            let checked = *thing.get_ref::<u64>();
+            let unchecked = unsafe { *thing.get_ref_unchecked::<u64>() };
+            assert_eq!(checked, unchecked);
+            assert_eq!(unsafe { thing.get_unchecked::<u64>() }, 42);
+        }
+
+        #[test]
+        fn get_unchecked_moves_ownership_without_double_drop() {
+            let token = Rc::new(());
+
+            // Inline: an `Rc` is 8 bytes, which fits in `Thing<24>`.
+            let thing: Thing<24> = Thing::new(Rc::clone(&token));
+            let value = unsafe { thing.get_unchecked::<Rc<()>>() };
+            assert_eq!(Rc::strong_count(&token), 2);
+            drop(value);
+            assert_eq!(Rc::strong_count(&token), 1);
+
+            // Boxed: 16 bytes do not fit in `Thing<8>`.
+            assert!(Thing::<8>::boxed::<(Rc<()>, u64)>());
+            let thing: Thing<8> = Thing::new((Rc::clone(&token), 9u64));
+            let value = unsafe { thing.get_unchecked::<(Rc<()>, u64)>() };
+            assert_eq!(Rc::strong_count(&token), 2);
+            drop(value);
+            assert_eq!(Rc::strong_count(&token), 1);
+        }
+
+        #[test]
+        fn unchecked_reads_leave_the_thing_droppable_exactly_once() {
+            let token = Rc::new(());
+            let thing: Thing<24> = Thing::new(Rc::clone(&token));
+            let peek = unsafe { thing.get_ref_unchecked::<Rc<()>>() };
+            assert_eq!(Rc::strong_count(peek), 2);
+            drop(thing);
+            assert_eq!(Rc::strong_count(&token), 1);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_unchecked() {
+            let thing: Thing<24> = Thing::new(1u32);
+            // Deliberately wrong. Debug builds panic before touching the
+            // data; this is never done in release builds.
+            let _ = unsafe { thing.get_unchecked::<String>() };
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_ref_unchecked() {
+            let thing: Thing<24> = Thing::new(1u32);
+            let _ = unsafe { thing.get_ref_unchecked::<u64>() };
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_mut_unchecked() {
+            let mut thing: Thing<24> = Thing::new(1u32);
+            let _ = unsafe { thing.get_mut_unchecked::<i32>() };
+        }
+    }
+
+    mod raw {
+        use crate::thing::RawThing;
+        use core::any::TypeId;
+        use std::rc::Rc;
+
+        #[repr(align(16))]
+        #[derive(Debug, PartialEq)]
+        struct Aligned(u32);
+
+        #[test]
+        #[cfg(not(debug_assertions))]
+        fn a_raw_thing_is_16_bytes_smaller_than_a_thing_in_release_builds() {
+            use crate::thing::Thing;
+
+            assert_eq!(core::mem::size_of::<RawThing<24>>(), 32);
+            assert_eq!(core::mem::size_of::<Thing<24>>(), 48);
+            assert_eq!(core::mem::size_of::<RawThing<8>>(), 16);
+            assert_eq!(core::mem::size_of::<Thing<8>>(), 32);
+            // What a `ThingMap` entry holds.
+            assert_eq!(core::mem::size_of::<(TypeId, RawThing<24>)>(), 48);
+            assert_eq!(core::mem::size_of::<(TypeId, Thing<24>)>(), 64);
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        fn debug_builds_keep_the_type_id_to_check_the_accessors() {
+            assert_eq!(
+                core::mem::size_of::<RawThing<24>>(),
+                32 + core::mem::size_of::<TypeId>()
+            );
+        }
+
+        #[test]
+        fn round_trips_inline_boxed_and_zero_sized_values() {
+            // SAFETY (all `unsafe` below): the type argument always matches
+            // the type the storage was created with.
+            let inline = RawThing::<24>::new(String::from("inline"));
+            assert_eq!(unsafe { inline.get_unchecked::<String>() }, "inline");
+
+            let boxed = RawThing::<24>::new([7u64; 16]);
+            assert_eq!(unsafe { boxed.get_unchecked::<[u64; 16]>() }, [7u64; 16]);
+
+            let aligned = RawThing::<32>::new(Aligned(5)); // alignment above 8: boxed
+            assert_eq!(unsafe { aligned.get_unchecked::<Aligned>() }, Aligned(5));
+
+            let zst = RawThing::<0>::new(());
+            let () = unsafe { zst.get_unchecked::<()>() };
+        }
+
+        #[test]
+        fn references_read_and_change_the_stored_value() {
+            for boxed in [false, true] {
+                if boxed {
+                    let mut raw = RawThing::<8>::new(vec![1, 2]); // 24 bytes: boxed
+                    unsafe { raw.get_mut_unchecked::<Vec<i32>>().push(3) };
+                    assert_eq!(unsafe { raw.get_ref_unchecked::<Vec<i32>>() }, &[1, 2, 3]);
+                } else {
+                    let mut raw = RawThing::<24>::new(vec![1, 2]);
+                    unsafe { raw.get_mut_unchecked::<Vec<i32>>().push(3) };
+                    assert_eq!(unsafe { raw.get_ref_unchecked::<Vec<i32>>() }, &[1, 2, 3]);
+                }
+            }
+        }
+
+        #[test]
+        fn dropping_and_taking_drop_the_value_exactly_once() {
+            let token = Rc::new(());
+            for size_is_small in [false, true] {
+                // Dropped without ever being read.
+                if size_is_small {
+                    drop(RawThing::<8>::new((Rc::clone(&token), 0u64))); // boxed
+                } else {
+                    drop(RawThing::<24>::new(Rc::clone(&token)));
+                }
+                assert_eq!(Rc::strong_count(&token), 1);
+
+                // Moved out, then dropped by the caller.
+                let value = if size_is_small {
+                    let raw = RawThing::<8>::new((Rc::clone(&token), 0u64));
+                    let (rc, _) = unsafe { raw.get_unchecked::<(Rc<()>, u64)>() };
+                    rc
+                } else {
+                    let raw = RawThing::<24>::new(Rc::clone(&token));
+                    unsafe { raw.get_unchecked::<Rc<()>>() }
+                };
+                assert_eq!(Rc::strong_count(&token), 2);
+                drop(value);
+                assert_eq!(Rc::strong_count(&token), 1);
+            }
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_unchecked() {
+            let raw = RawThing::<24>::new(1u32);
+            let _ = unsafe { raw.get_unchecked::<String>() };
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_ref_unchecked() {
+            let raw = RawThing::<24>::new(1u32);
+            let _ = unsafe { raw.get_ref_unchecked::<u64>() };
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "does not match")]
+        fn debug_builds_catch_a_wrong_type_in_get_mut_unchecked() {
+            let mut raw = RawThing::<24>::new(1u32);
+            let _ = unsafe { raw.get_mut_unchecked::<i32>() };
         }
     }
 
@@ -733,7 +1168,7 @@ mod tests {
         #[test]
         fn thing_debug_is_non_empty() {
             let t: Thing<24> = Thing::new(42u32);
-            assert!(!format!("{t:?}").is_empty());
+            assert_ne!(format!("{t:?}"), "");
         }
     }
 }
