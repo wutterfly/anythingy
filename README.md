@@ -8,6 +8,7 @@ Collections and containers with different space/time trade-offs than the ones in
 | Type | What it is |
 |---|---|
 | `Thing`, `SThing` | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is `Send + Sync`) |
+| `AtomicRefCell` | A `RefCell` that can be shared between threads, with borrows checked at runtime and never waited for |
 | `AtomicSlot` | A single-value mailbox shared between threads, where the latest value replaces the previous one |
 | `TokenStore` | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 | `InlineVec` | A vector that keeps its first few elements inline and only allocates beyond that |

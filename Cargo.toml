@@ -24,6 +24,10 @@ slotmap = "1.1.1"
 smallvec = "1.16.2"
 
 [[bench]]
+name = "atomic_ref_cell"
+harness = false
+
+[[bench]]
 name = "atomic_slot"
 harness = false
 

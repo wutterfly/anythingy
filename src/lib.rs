@@ -4,6 +4,7 @@
 //! | Type | What it is |
 //! |---|---|
 //! | [`Thing`], [`SThing`] | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is thread-safe) |
+//! | [`AtomicRefCell`] | A `RefCell` that can be shared between threads, with borrows checked at runtime and never waited for |
 //! | [`AtomicSlot`] | A single-value mailbox shared between threads, where the latest value replaces the previous one |
 //! | [`TokenStore`] | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 //! | [`InlineVec`] | A vector that keeps its first few elements inline and only allocates beyond that |
@@ -35,6 +36,7 @@
 
 extern crate alloc;
 
+pub mod atomic_ref_cell;
 pub mod atomic_slot;
 #[cfg(feature = "std")]
 pub mod event_queue;
@@ -49,6 +51,7 @@ pub mod thing;
 pub mod thing_map;
 pub mod token_store;
 
+pub use atomic_ref_cell::AtomicRefCell;
 pub use atomic_slot::AtomicSlot;
 #[cfg(feature = "std")]
 pub use event_queue::EventQueue;

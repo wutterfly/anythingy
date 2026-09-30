@@ -5,6 +5,10 @@
 ### Added
 
 - `AtomicSlot`: a single-value slot that threads hand values to each other through. `push` stores a value and drops the previous one, `take` removes it. It allocates only when created, works without `std`, and is `Send + Sync` whenever `T: Send`.
+- `AtomicRefCell`: a `RefCell` that can be shared between threads. Borrows are checked at runtime and a conflict is reported (`try_borrow`, `try_borrow_mut`) or panics (`borrow`, `borrow_mut`), it never waits. It works without `std`, allocates nothing, and is `Sync` when `T: Send + Sync`.
+  - The methods of `RefCell`: `replace`, `replace_with`, `swap`, `take`, `get_mut`, `into_inner` and `as_ptr`, and the `unsafe` `borrow_unchecked` and `borrow_mut_unchecked`.
+  - The guards `AtomicRef` and `AtomicRefMut`, with `map`, `filter_map` and `AtomicRef::clone`.
+  - `Default`, `From`, `Clone`, `Debug`, `PartialEq`, `Eq`, `PartialOrd` and `Ord`, and support for unsized values such as `AtomicRefCell<[T]>` and `AtomicRefCell<dyn Trait>`.
 
 ## 0.3.2
 
