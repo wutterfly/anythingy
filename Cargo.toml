@@ -1,6 +1,6 @@
 [package]
 name = "anythingy"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 rust-version = "1.88"
 description = "Collections with different space/time trade-offs: a type-erased Thing, a generational TokenStore, InlineVec, LinearMap and LinearSet, a type map and an event queue."
@@ -22,6 +22,10 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 crossbeam-channel = "0.5.17"
 slotmap = "1.1.1"
 smallvec = "1.16.2"
+
+[[bench]]
+name = "atomic_slot"
+harness = false
 
 [[bench]]
 name = "linear_map"

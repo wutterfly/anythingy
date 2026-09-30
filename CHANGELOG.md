@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3
+
+### Added
+
+- `AtomicSlot`: a single-value slot that threads hand values to each other through. `push` stores a value and drops the previous one, `take` removes it. It allocates only when created, works without `std`, and is `Send + Sync` whenever `T: Send`.
+
 ## 0.3.2
 
 `EventQueue` draining no longer throws its buffers away, and pushing is faster.

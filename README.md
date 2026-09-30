@@ -8,6 +8,7 @@ Collections and containers with different space/time trade-offs than the ones in
 | Type | What it is |
 |---|---|
 | `Thing`, `SThing` | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is `Send + Sync`) |
+| `AtomicSlot` | A single-value mailbox shared between threads, where the latest value replaces the previous one |
 | `TokenStore` | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 | `InlineVec` | A vector that keeps its first few elements inline and only allocates beyond that |
 | `LinearMap`, `LinearSet` | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |

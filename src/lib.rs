@@ -4,6 +4,7 @@
 //! | Type | What it is |
 //! |---|---|
 //! | [`Thing`], [`SThing`] | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is thread-safe) |
+//! | [`AtomicSlot`] | A single-value mailbox shared between threads, where the latest value replaces the previous one |
 //! | [`TokenStore`] | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 //! | [`InlineVec`] | A vector that keeps its first few elements inline and only allocates beyond that |
 //! | [`LinearMap`], [`LinearSet`] | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
@@ -34,6 +35,7 @@
 
 extern crate alloc;
 
+pub mod atomic_slot;
 #[cfg(feature = "std")]
 pub mod event_queue;
 pub mod inline_vec;
@@ -47,6 +49,7 @@ pub mod thing;
 pub mod thing_map;
 pub mod token_store;
 
+pub use atomic_slot::AtomicSlot;
 #[cfg(feature = "std")]
 pub use event_queue::EventQueue;
 pub use inline_vec::InlineVec;
