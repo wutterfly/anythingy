@@ -2,6 +2,7 @@
 //!
 //! See [`LinearSet`] for details and when to prefer it over `HashSet`.
 
+use crate::heap_size::HeapSize;
 use core::borrow::Borrow;
 use core::fmt;
 use core::iter::{Chain, FromIterator, FusedIterator};
@@ -614,6 +615,14 @@ impl<T: Eq + fmt::Debug> fmt::Debug for SymmetricDifference<'_, T> {
     }
 }
 
+/// Counts the buffer of elements, which is `0` for a set that has not
+/// allocated yet.
+impl<T> HeapSize for LinearSet<T> {
+    fn heap_size(&self) -> usize {
+        self.map.heap_size()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1030,5 +1039,17 @@ mod tests {
         assert_eq!(live(&token), 6);
         drop((set, copy));
         assert_eq!(live(&token), 0);
+    }
+
+    #[test]
+    fn heap_size_is_the_buffer_of_elements() {
+        let mut set = LinearSet::<u64>::new();
+        assert_eq!(set.heap_size(), 0);
+
+        set.insert(1);
+        assert_eq!(set.heap_size(), set.capacity() * size_of::<u64>());
+
+        let reserved = LinearSet::<u64>::with_capacity(50);
+        assert!(reserved.heap_size() >= 50 * size_of::<u64>());
     }
 }

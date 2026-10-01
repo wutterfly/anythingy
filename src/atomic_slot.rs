@@ -2,6 +2,7 @@
 //!
 //! See [`AtomicSlot`].
 
+use crate::heap_size::HeapSize;
 use alloc::boxed::Box;
 use core::fmt;
 use core::marker::PhantomData;
@@ -227,9 +228,18 @@ impl<T> Drop for AtomicSlot<T> {
     }
 }
 
+/// Counts the two boxes that the slot allocates in [`AtomicSlot::new`], which
+/// is all it ever allocates, whatever it holds.
+impl<T> HeapSize for AtomicSlot<T> {
+    fn heap_size(&self) -> usize {
+        2 * size_of::<Option<T>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AtomicSlot;
+    use crate::heap_size::HeapSize;
 
     #[test]
     fn push_then_take() {
@@ -333,5 +343,24 @@ mod tests {
         // the slot must still be fully usable: `spare` was never left without a box to give back
         slot.push(MaybeDropPanics(false));
         assert!(slot.take().is_some());
+    }
+
+    #[test]
+    fn heap_size_is_the_two_boxes_whatever_the_content() {
+        let slot = AtomicSlot::<u64>::new();
+        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+
+        slot.push(1);
+        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+        let _ = slot.take();
+        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+
+        // What the value owns is not counted.
+        let strings = AtomicSlot::new();
+        strings.push(alloc::string::String::from("a long enough text"));
+        assert_eq!(
+            strings.heap_size(),
+            2 * size_of::<Option<alloc::string::String>>()
+        );
     }
 }

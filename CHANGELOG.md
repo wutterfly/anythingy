@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.4
+
+### Added
+
+- `HeapSize`: a trait that reports how many bytes of heap memory a structure has allocated for itself. It is implemented for `AtomicRefCell`, `AtomicSlot`, `EventQueue`, `InlineVec`, `LinearMap`, `LinearSet`, `TokenStore`, `Thing`, `SThing`, `ThingMap` and `SThingMap`, and for the types of the standard library that allocate: `Vec`, `String`, `VecDeque`, `BinaryHeap` and `Box` report their allocation exactly, `LinkedList`, `BTreeMap`, `BTreeSet`, `Rc`, `Arc`, and with `std` `HashMap` and `HashSet` a lower bound, since their layout is not exposed. `ThingMap` and `SThingMap` report a lower bound as well, plus the boxes of the values that did not fit inline.
+
+### Changed
+
+- Dropping a `Thing`, and the values of a `ThingMap`, is faster, up to about twice as fast for values that are stored inline. The value is dropped in place, and the buffer is no longer copied out first.
+
 ## 0.3.3
 
 ### Added

@@ -18,6 +18,9 @@
     doc = "| [`EventQueue`] | A multi-producer queue that is drained in batches |"
 )]
 //!
+//! The [`HeapSize`] trait reports how many bytes of heap memory a structure has
+//! allocated, and is implemented by the types above.
+//!
 //! # Features and `no_std`
 //!
 //! The crate is `no_std`-compatible and only needs `alloc`. The default `std`
@@ -40,6 +43,7 @@ pub mod atomic_ref_cell;
 pub mod atomic_slot;
 #[cfg(feature = "std")]
 pub mod event_queue;
+pub mod heap_size;
 pub mod inline_vec;
 pub mod linear_map;
 pub mod linear_set;
@@ -55,6 +59,7 @@ pub use atomic_ref_cell::AtomicRefCell;
 pub use atomic_slot::AtomicSlot;
 #[cfg(feature = "std")]
 pub use event_queue::EventQueue;
+pub use heap_size::HeapSize;
 pub use inline_vec::InlineVec;
 pub use linear_map::LinearMap;
 pub use linear_set::LinearSet;

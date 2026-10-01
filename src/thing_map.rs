@@ -2,6 +2,7 @@
 //!
 //! See [`ThingMap`] for details.
 
+use crate::heap_size::HeapSize;
 use std::any::TypeId;
 use std::collections::hash_map;
 use std::collections::{HashMap, TryReserveError};
@@ -525,6 +526,21 @@ impl<T: 'static, const SIZE: usize> fmt::Debug for VacantEntry<'_, T, SIZE> {
     }
 }
 
+/// A lower bound: room for as many values as the map can hold without growing,
+/// plus the allocation of each value that is boxed, see [`Thing`]'s
+/// implementation. What the values own is not included.
+///
+/// The standard library does not expose how a hash table is laid out, so the
+/// control data that it keeps for each bucket, and the buckets beyond the
+/// capacity, are left out.
+impl<const SIZE: usize, S> HeapSize for ThingMap<SIZE, S> {
+    fn heap_size(&self) -> usize {
+        let table = self.map.capacity() * size_of::<(TypeId, RawThing<SIZE>)>();
+        let boxes: usize = self.map.values().map(RawThing::heap_size).sum();
+        table + boxes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,5 +1042,38 @@ mod tests {
         assert_eq!(map.len(), 32);
         check_all!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31);
         assert!(map.get::<Marked<32>>().is_none());
+    }
+
+    #[test]
+    fn heap_size_is_zero_for_an_empty_map() {
+        assert_eq!(ThingMap::<24>::new().heap_size(), 0);
+        assert_eq!(ThingMap::<24>::with_capacity(0).heap_size(), 0);
+    }
+
+    #[test]
+    fn heap_size_counts_the_room_for_values_and_the_boxed_ones() {
+        let mut map = ThingMap::<24>::with_capacity(7);
+        let table = map.heap_size();
+        assert!(table >= 7 * size_of::<(TypeId, RawThing<24>)>());
+        assert_eq!(table, map.capacity() * size_of::<(TypeId, RawThing<24>)>());
+
+        // Inline values add nothing to the table that is already there.
+        map.insert(1_u64);
+        map.insert(String::from("a"));
+        assert_eq!(map.heap_size(), table);
+
+        // A boxed value adds its own allocation.
+        map.insert([0_u64; 10]);
+        assert_eq!(map.heap_size(), table + 80);
+
+        // Another type, another box.
+        map.insert([0_u64; 4]);
+        assert_eq!(map.heap_size(), table + 80 + 32);
+
+        // Removing a value gives its box back.
+        map.remove::<[u64; 10]>();
+        assert_eq!(map.heap_size(), table + 32);
+        map.remove::<[u64; 4]>();
+        assert_eq!(map.heap_size(), table);
     }
 }

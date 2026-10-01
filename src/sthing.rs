@@ -2,6 +2,7 @@
 //!
 //! See [`SThing`].
 
+use crate::heap_size::HeapSize;
 use crate::thing::{DEFAULT_THING_SIZE, Thing};
 
 /// A [`Thing`] that is `Send` and `Sync`.
@@ -193,6 +194,15 @@ impl<const SIZE: usize> From<SThing<SIZE>> for Thing<SIZE> {
     }
 }
 
+/// Reports the allocation of a value that is boxed, which is `0` for a value
+/// that is stored inline. See [`Thing`]'s implementation.
+impl<const SIZE: usize> HeapSize for SThing<SIZE> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.0.heap_size()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +289,11 @@ mod tests {
     fn converts_into_thing() {
         let thing: Thing<24> = SThing::new(9_i64).into();
         assert_eq!(*thing.get_ref::<i64>(), 9);
+    }
+
+    #[test]
+    fn heap_size_is_the_box_of_a_big_value() {
+        assert_eq!(SThing::<24>::new(5_u64).heap_size(), 0);
+        assert_eq!(SThing::<8>::new([0_u64; 10]).heap_size(), 80);
     }
 }

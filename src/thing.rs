@@ -2,6 +2,7 @@
 //!
 //! See [`Thing`].
 
+use crate::heap_size::HeapSize;
 use alloc::boxed::Box;
 use core::{
     any::TypeId,
@@ -61,7 +62,7 @@ pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
 }
 
 /// The storage of a [`Thing`] without its `TypeId`: a type-erased value and
-/// the function that drops it.
+/// the one function that knows how to handle it (see [`Op`]).
 ///
 /// It cannot check types, so all of its accessors are `unsafe`: the caller
 /// has to know the type. This is what a container that already tracks the
@@ -74,7 +75,7 @@ pub struct Thing<const SIZE: usize = DEFAULT_THING_SIZE> {
 #[derive(Debug)]
 #[repr(align(8))]
 pub(crate) struct RawThing<const SIZE: usize> {
-    drop: fn(UnsafeCell<AlignedBytes<SIZE>>),
+    glue: Glue<SIZE>,
     data: UnsafeCell<AlignedBytes<SIZE>>,
     #[cfg(debug_assertions)]
     debug_id: TypeId,
@@ -84,6 +85,26 @@ pub(crate) struct RawThing<const SIZE: usize> {
 #[derive(Debug)]
 #[repr(align(8))]
 struct AlignedBytes<const SIZE: usize>([MaybeUninit<u8>; SIZE]);
+
+/// What a [`RawThing`]'s function is asked to do with the value it belongs to.
+///
+/// A single function pointer serves every operation, so that the storage
+/// stays one pointer plus the data, and a call is a plain indirect call, with
+/// no table to look through.
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    /// Drops the value in place. The buffer must not be used afterwards.
+    Drop,
+    /// Returns the bytes the value has on the heap. Touches nothing.
+    HeapSize,
+}
+
+/// The function stored in a [`RawThing`], made for one type `T`.
+///
+/// # Safety
+/// The pointer must point at the buffer of the `RawThing` that the function
+/// was made for, which holds a value of that type.
+type Glue<const SIZE: usize> = unsafe fn(*mut AlignedBytes<SIZE>, Op) -> usize;
 
 impl<const SIZE: usize> Thing<SIZE> {
     /// Creates a new `Thing` from generic type `T`. Uses the boxed value, if size of `T` is bigger than `SIZE`.
@@ -378,7 +399,7 @@ impl<const SIZE: usize> RawThing<SIZE> {
             // convert type to bytes
             let data = convert.bytes();
 
-            return Self::from_parts(Self::drop_glue::<T>, data, TypeId::of::<T>());
+            return Self::from_parts(Self::glue::<T>, data, TypeId::of::<T>());
         }
 
         // convert type from bytes (T)
@@ -387,25 +408,23 @@ impl<const SIZE: usize> RawThing<SIZE> {
         // convert type to bytes
         let data = convert.bytes();
 
-        // get drop glue
-        let drop = if core::mem::needs_drop::<T>() {
-            Self::drop_glue::<T>
+        // Values that are stored inline and need no drop have nothing to do,
+        // and nothing on the heap, so they share one function that does
+        // nothing.
+        let glue = if core::mem::needs_drop::<T>() {
+            Self::glue::<T>
         } else {
-            Self::empty_drop_glue
+            Self::empty_glue
         };
 
-        Self::from_parts(drop, data, TypeId::of::<T>())
+        Self::from_parts(glue, data, TypeId::of::<T>())
     }
 
     #[inline]
     #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-    fn from_parts(
-        drop: fn(UnsafeCell<AlignedBytes<SIZE>>),
-        data: UnsafeCell<AlignedBytes<SIZE>>,
-        id: TypeId,
-    ) -> Self {
+    fn from_parts(glue: Glue<SIZE>, data: UnsafeCell<AlignedBytes<SIZE>>, id: TypeId) -> Self {
         Self {
-            drop,
+            glue,
             data,
             #[cfg(debug_assertions)]
             debug_id: id,
@@ -431,11 +450,11 @@ impl<const SIZE: usize> RawThing<SIZE> {
     pub(crate) unsafe fn get_unchecked<T: 'static>(mut self) -> T {
         self.debug_check::<T>();
 
-        // Prevent double-drop: mark drop as empty; we'll move the data out ourselves.
-        self.drop = Self::empty_drop_glue;
+        // Prevent double-drop: mark the glue as empty; we'll move the data out ourselves.
+        self.glue = Self::empty_glue;
 
-        // SAFETY: the buffer is moved out exactly once, and `drop` was just
-        // replaced by a no-op, so nothing reads or drops it again.
+        // SAFETY: the buffer is moved out exactly once, and `glue` was just
+        // replaced by one that does nothing, so nothing reads or drops it again.
         let data = unsafe { self.move_data_uninit() };
 
         if Thing::<SIZE>::boxed::<T>() {
@@ -490,42 +509,74 @@ impl<const SIZE: usize> RawThing<SIZE> {
         core::mem::replace(&mut self.data, fill)
     }
 
+    /// The function for a value of type `T` that is stored in a `RawThing`.
+    ///
+    /// # Safety
+    /// See [`Glue`]. `Op::Drop` additionally leaves the buffer logically
+    /// moved out: it must not be dropped or read again.
     #[inline]
-    fn drop_glue<T: 'static>(data: UnsafeCell<AlignedBytes<SIZE>>) {
-        if Thing::<SIZE>::boxed::<T>() {
-            // convert type from bytes (Box<T>)
-            let convert = Convert::<SIZE, Box<T>>::from_bytes(data);
+    unsafe fn glue<T: 'static>(data: *mut AlignedBytes<SIZE>, op: Op) -> usize {
+        let boxed = Thing::<SIZE>::boxed::<T>();
 
-            // move value out of box and drop
-            let t: Box<T> = convert.get();
-            drop(t);
-            return;
+        match op {
+            // A boxed value's allocation is the size of the value. What the
+            // value itself owns is not known here.
+            Op::HeapSize => {
+                if boxed {
+                    core::mem::size_of::<T>()
+                } else {
+                    0
+                }
+            }
+            Op::Drop => {
+                if boxed {
+                    // SAFETY: the buffer holds the `Box<T>` that `new` wrote
+                    // there, which is moved out exactly once and dropped.
+                    drop(unsafe { core::ptr::read(data.cast::<Box<T>>()) });
+                } else {
+                    // Sanity check: if the type would be stored unboxed, its alignment must fit into our buffer.
+                    // If this fails in debug builds it indicates a mismatch between `boxed::<T>()` and actual alignment.
+                    debug_assert!(
+                        core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
+                        "alignment of T exceeds alignment of Thing storage; T should have been boxed"
+                    );
+
+                    // SAFETY: the buffer holds the `T` that `new` wrote there,
+                    // which is dropped in place exactly once.
+                    unsafe { core::ptr::drop_in_place(data.cast::<T>()) };
+                }
+                0
+            }
         }
-
-        // Sanity check: if the type would be stored unboxed, its alignment must fit into our buffer.
-        // If this fails in debug builds it indicates a mismatch between `boxed::<T>()` and actual alignment.
-        debug_assert!(
-            core::mem::align_of::<T>() <= core::mem::align_of::<AlignedBytes<SIZE>>(),
-            "alignment of T exceeds alignment of Thing storage; T should have been boxed"
-        );
-
-        // convert bytes to t
-        let convert = Convert::<SIZE, T>::from_bytes(data);
-        let t: T = convert.get();
-
-        drop(t);
     }
 
+    /// The function for values that are stored inline and need no drop.
+    ///
+    /// # Safety
+    /// Always safe to call, it does not touch the buffer.
     #[inline]
-    const fn empty_drop_glue<const S: usize>(_: UnsafeCell<AlignedBytes<S>>) {}
+    const unsafe fn empty_glue(_: *mut AlignedBytes<SIZE>, _: Op) -> usize {
+        0
+    }
+
+    /// Returns the bytes that the value has allocated on the heap: the size of
+    /// the value if it is boxed, and `0` if it is stored inline. What the
+    /// value owns itself is not included.
+    #[inline]
+    pub(crate) fn heap_size(&self) -> usize {
+        // SAFETY: `glue` was made for the value in `data`. `HeapSize` reads
+        // nothing from the buffer, so the pointer from the `UnsafeCell` is
+        // enough, and `&self` is not violated.
+        unsafe { (self.glue)(self.data.get(), Op::HeapSize) }
+    }
 }
 
 impl<const SIZE: usize> core::ops::Drop for RawThing<SIZE> {
     #[inline]
     fn drop(&mut self) {
-        // Take ownership of the bytes buffer and call the stored drop function.
-        let drop_buf = unsafe { self.move_data_uninit() };
-        (self.drop)(drop_buf);
+        // SAFETY: `glue` was made for the value in `data`, and the buffer is
+        // never used again after this.
+        unsafe { (self.glue)(core::ptr::from_mut(self.data.get_mut()), Op::Drop) };
     }
 }
 
@@ -644,6 +695,19 @@ impl<const SIZE: usize, T> core::fmt::Debug for Convert<SIZE, T> {
         let name = core::any::type_name::<T>();
         let bytes = unsafe { &*(self.bytes.get().cast_const()) };
         write!(f, "{name}: {bytes:?}")
+    }
+}
+
+/// Reports the allocation of a value that is too big for `SIZE`, or over-aligned,
+/// and is boxed. A value that is stored inline has nothing on the heap, so this
+/// is `0`.
+///
+/// What the value owns is not included, since a `Thing` does not know its type:
+/// a `String` stored in a `Thing` reports `0`, not the length of its text.
+impl<const SIZE: usize> HeapSize for Thing<SIZE> {
+    #[inline]
+    fn heap_size(&self) -> usize {
+        self.raw.heap_size()
     }
 }
 
@@ -1169,6 +1233,76 @@ mod tests {
         fn thing_debug_is_non_empty() {
             let t: Thing<24> = Thing::new(42u32);
             assert_ne!(format!("{t:?}"), "");
+        }
+    }
+
+    mod heap_size {
+        use crate::{HeapSize, Thing};
+        use alloc::rc::Rc;
+        use alloc::string::String;
+
+        #[repr(align(16))]
+        struct OverAligned(#[allow(dead_code)] u8);
+
+        #[test]
+        fn inline_values_have_nothing_on_the_heap() {
+            assert_eq!(Thing::<24>::new(5_u64).heap_size(), 0);
+            assert_eq!(Thing::<24>::new([0_u8; 24]).heap_size(), 0);
+            assert_eq!(Thing::<24>::new(()).heap_size(), 0);
+            // A type that needs a drop, but is stored inline.
+            assert_eq!(Thing::<24>::new(String::from("text")).heap_size(), 0);
+        }
+
+        #[test]
+        fn boxed_values_report_the_size_of_the_value() {
+            // Too big for the slot.
+            assert_eq!(Thing::<8>::new([0_u64; 10]).heap_size(), 80);
+            assert_eq!(Thing::<24>::new([0_u8; 25]).heap_size(), 25);
+            // Over-aligned, so boxed although it is small.
+            assert_eq!(Thing::<24>::new(OverAligned(1)).heap_size(), 16);
+            // Too big, and also needs a drop.
+            assert_eq!(
+                Thing::<8>::new([String::new(), String::new()]).heap_size(),
+                48
+            );
+        }
+
+        #[test]
+        fn what_a_value_owns_is_not_counted() {
+            let text = String::from("a text that lives on the heap");
+            assert_eq!(Thing::<24>::new(text).heap_size(), 0);
+        }
+
+        #[test]
+        fn asking_does_not_disturb_the_value() {
+            let token = Rc::new(());
+
+            let boxed = Thing::<8>::new((Rc::clone(&token), 0_u64, 0_u64));
+            let inline = Thing::<24>::new(Rc::clone(&token));
+            for _ in 0..3 {
+                assert_eq!(boxed.heap_size(), 24);
+                assert_eq!(inline.heap_size(), 0);
+            }
+            assert_eq!(Rc::strong_count(&token), 3);
+
+            // Still readable, and dropped exactly once.
+            assert!(Rc::ptr_eq(inline.get_ref::<Rc<()>>(), &token));
+            drop(boxed);
+            assert_eq!(Rc::strong_count(&token), 2);
+            drop(inline);
+            assert_eq!(Rc::strong_count(&token), 1);
+        }
+
+        #[test]
+        fn a_moved_out_value_is_not_dropped_again() {
+            let token = Rc::new(());
+            let thing = Thing::<24>::new(Rc::clone(&token));
+            assert_eq!(thing.heap_size(), 0);
+
+            let value: Rc<()> = thing.get();
+            assert_eq!(Rc::strong_count(&token), 2);
+            drop(value);
+            assert_eq!(Rc::strong_count(&token), 1);
         }
     }
 }

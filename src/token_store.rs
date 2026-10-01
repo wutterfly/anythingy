@@ -2,6 +2,7 @@
 //!
 //! See [`TokenStore`] for details.
 
+use crate::heap_size::HeapSize;
 use alloc::vec::{self, Vec};
 use core::cmp::Ordering;
 use core::fmt;
@@ -1067,6 +1068,15 @@ pub struct ValuesMut<'a, T> {
 forward_iterator!({'a, T} ValuesMut<'a, T>, &'a mut T, |(_, value)| value);
 debug_remaining!({'a, T} ValuesMut ValuesMut<'a, T>);
 
+/// Counts the buffer of slots, which are the stored values and the vacant
+/// slots waiting to be reused. It is `0` for a store that has not allocated
+/// yet.
+impl<T> HeapSize for TokenStore<T> {
+    fn heap_size(&self) -> usize {
+        self.slots.capacity() * size_of::<Slot<T>>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Test values are small and narrowed on purpose.
@@ -2106,5 +2116,22 @@ mod tests {
         from_iter.sort();
         from_model.sort();
         assert_eq!(from_iter, from_model);
+    }
+
+    #[test]
+    fn heap_size_is_the_buffer_of_slots() {
+        let mut store = TokenStore::<u64>::new();
+        assert_eq!(store.heap_size(), 0);
+
+        let token = store.insert(1);
+        assert_eq!(store.heap_size(), store.capacity() * size_of::<Slot<u64>>());
+
+        // Removing a value frees no memory: its slot is kept for reuse.
+        let before = store.heap_size();
+        store.remove(token);
+        assert_eq!(store.heap_size(), before);
+
+        let reserved = TokenStore::<u64>::with_capacity(64);
+        assert!(reserved.heap_size() >= 64 * size_of::<Slot<u64>>());
     }
 }

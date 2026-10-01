@@ -3,6 +3,8 @@
 //!
 //! See [`EventQueue`].
 
+use crate::heap_size::HeapSize;
+use std::alloc::Layout;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ptr;
@@ -162,21 +164,30 @@ impl<T> ThreadBuffer<T> {
         }
     }
 
-    /// Peeks the current length without taking ownership. Pays the same
+    /// Looks at the vec without taking ownership. Pays the same
     /// swap-and-restore cost as `push`/`take`, which is fine since this
-    /// is only used by [`EventQueue::len`]/[`EventQueue::is_empty`], not
-    /// on any per-push hot path.
-    fn peek_len(&self) -> usize {
+    /// is only used by [`EventQueue::len`], [`EventQueue::is_empty`] and
+    /// [`EventQueue::heap_size`], not on any per-push hot path.
+    fn peek<R>(&self, f: impl FnOnce(&Vec<T>) -> R) -> R {
         loop {
             let ptr = self.slot.swap(ptr::null_mut(), Ordering::Acquire);
             if ptr.is_null() {
                 std::hint::spin_loop();
                 continue;
             }
-            let len = unsafe { (*ptr).len() };
-            self.slot.store(ptr, Ordering::Release);
-            return len;
+            // Puts the ticket back also if `f` unwinds.
+            let _restore = Restore {
+                slot: &self.slot,
+                ptr,
+            };
+            // SAFETY: the non-null pointer was swapped out, so this thread
+            // has exclusive access to the vec until `_restore` stores it back.
+            return f(unsafe { &*ptr });
         }
+    }
+
+    fn peek_len(&self) -> usize {
+        self.peek(Vec::len)
     }
 }
 
@@ -708,6 +719,14 @@ impl<T: Send> EventQueue<T> {
         true
     }
 
+    /// Capacity of the first registered buffer (test-only).
+    #[cfg(test)]
+    fn thread_buffer_capacity(&self) -> usize {
+        let node = self.registry_head.load(Ordering::Acquire);
+        assert!(!node.is_null());
+        unsafe { (*node).buffer.peek(Vec::capacity) }
+    }
+
     /// Number of nodes ever linked into the registry (test-only).
     #[cfg(test)]
     fn registry_len(&self) -> usize {
@@ -746,6 +765,52 @@ impl<T> Drop for EventQueue<T> {
             // `boxed.buffer` (a `ThreadBuffer<T>`) drops here, freeing
             // whatever vec it's currently holding.
         }
+    }
+}
+
+/// Counts everything the queue has allocated: the shared liveness flag, a node
+/// for each thread that has pushed (nodes are reused by later threads, so this
+/// follows the peak number of threads pushing at the same time), and each
+/// thread's buffer of events with its unused capacity, plus the spare buffer
+/// that [`drain_each`](EventQueue::drain_each) keeps.
+///
+/// Like [`len`](EventQueue::len) it visits every thread's buffer, so it is
+/// meant for occasional checks, and the result is a snapshot.
+impl<T> HeapSize for EventQueue<T> {
+    fn heap_size(&self) -> usize {
+        // The header of a `Vec`, which every thread buffer is boxed behind.
+        let vec_header = size_of::<Vec<T>>();
+
+        // The allocation of the `Arc`: two counters, then the flag.
+        let mut total = Layout::new::<[usize; 2]>()
+            .extend(Layout::new::<QueueLife>())
+            .map_or(0, |(layout, _)| layout.pad_to_align().size());
+
+        let mut node = self.registry_head.load(Ordering::Acquire);
+        while !node.is_null() {
+            // SAFETY: nodes are never freed while the queue is alive.
+            let n = unsafe { &*node };
+            let capacity = n.buffer.peek(Vec::capacity);
+            total += size_of::<RegistryNode<T>>() + vec_header + capacity * size_of::<T>();
+            node = n.next;
+        }
+
+        // Take the spare to look at it, and put it back like `drain_each`
+        // does, so that a drain running at the same time is not disturbed.
+        let spare = self.spare.swap(ptr::null_mut(), Ordering::Acquire);
+        if !spare.is_null() {
+            // SAFETY: swapping it out made this call its only owner.
+            total += vec_header + unsafe { (*spare).capacity() } * size_of::<T>();
+            let displaced = self.spare.swap(spare, Ordering::AcqRel);
+            if !displaced.is_null() {
+                // A concurrent drain stored one too; keep the newer one.
+                // SAFETY: it was created by `Box::into_raw`, and swapping it
+                // out made this call its only owner.
+                drop(unsafe { Box::from_raw(displaced) });
+            }
+        }
+
+        total
     }
 }
 
@@ -1237,5 +1302,61 @@ mod tests {
         got.sort_unstable();
         let expected: Vec<u64> = (0..PRODUCERS * PER_PRODUCER).collect();
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn heap_size_counts_nodes_buffers_and_the_spare() {
+        let q = EventQueue::<u64>::new();
+        let empty = q.heap_size();
+        assert!(empty > 0, "the shared flag is allocated by `new`");
+
+        // One thread has pushed: a node, a boxed vec header and the buffer.
+        for i in 0..1_000 {
+            q.push(i);
+        }
+        let capacity = q.thread_buffer_capacity();
+        assert!(capacity >= 1_000);
+        assert_eq!(
+            q.heap_size(),
+            empty
+                + size_of::<RegistryNode<u64>>()
+                + size_of::<Vec<u64>>()
+                + capacity * size_of::<u64>()
+        );
+
+        // Draining gives nothing back: the events' buffer is exchanged for
+        // the spare one, which the queue keeps (with its own boxed header).
+        let before = q.heap_size();
+        drop(q.drain());
+        assert_eq!(q.heap_size(), before + size_of::<Vec<u64>>());
+        let before = q.heap_size();
+        drop(q.drain());
+        assert_eq!(q.heap_size(), before);
+
+        // Another buffer was needed for the events pushed since.
+        q.push(1);
+        q.drain_each(|_| {});
+        assert!(q.heap_size() >= before);
+
+        // A second thread brings a node and a buffer of its own.
+        let one_thread = q.heap_size();
+        std::thread::scope(|s| {
+            s.spawn(|| q.push(2));
+        });
+        assert!(q.heap_size() > one_thread);
+    }
+
+    #[test]
+    fn heap_size_leaves_the_queue_working() {
+        let q = EventQueue::new();
+        q.push(1);
+        q.drain_each(|_| {});
+        let first = q.heap_size();
+        assert_eq!(q.heap_size(), first);
+
+        q.push(2);
+        q.push(3);
+        assert_eq!(q.drain(), [2, 3]);
+        assert!(q.heap_size() >= first);
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! See [`SThingMap`] for details.
 
+use crate::heap_size::HeapSize;
 use std::any::TypeId;
 use std::collections::TryReserveError;
 use std::fmt;
@@ -291,6 +292,15 @@ impl<const SIZE: usize, S> fmt::Debug for SThingMap<SIZE, S> {
         fmt::Debug::fmt(&self.inner, f)
     }
 }
+
+/// A lower bound, like [`ThingMap`]'s implementation: room for the values, and
+/// the boxes of the ones that are boxed.
+impl<const SIZE: usize, S> HeapSize for SThingMap<SIZE, S> {
+    fn heap_size(&self) -> usize {
+        self.inner.heap_size()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,5 +578,18 @@ mod tests {
             worker.join().unwrap();
         }
         assert_eq!(global.lock().unwrap().get::<u64>(), Some(&4));
+    }
+
+    #[test]
+    fn heap_size_counts_the_room_for_values_and_the_boxed_ones() {
+        let mut map = SThingMap::<24>::with_capacity(7);
+        let table = map.heap_size();
+        assert!(table > 0);
+
+        map.insert(1_u64);
+        assert_eq!(map.heap_size(), table);
+
+        map.insert([0_u64; 10]);
+        assert_eq!(map.heap_size(), table + 80);
     }
 }

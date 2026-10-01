@@ -2,6 +2,7 @@
 //!
 //! See [`InlineVec`] for details.
 
+use crate::heap_size::HeapSize;
 use alloc::vec::Vec;
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp::Ordering;
@@ -976,6 +977,17 @@ impl<T: fmt::Debug, const N: usize> fmt::Debug for Drain<'_, T, N> {
     }
 }
 
+/// Counts the buffer that the elements moved to once they no longer fit
+/// inline, which is `0` before that.
+impl<T, const N: usize> HeapSize for InlineVec<T, N> {
+    fn heap_size(&self) -> usize {
+        match &self.repr {
+            Repr::Inline { .. } => 0,
+            Repr::Heap(vec) => vec.capacity() * size_of::<T>(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Test values are small and narrowed on purpose, and helper types are
@@ -1943,5 +1955,31 @@ mod tests {
         compare_with_vec::<1>(2, steps);
         compare_with_vec::<4>(3, steps);
         compare_with_vec::<8>(4, steps);
+    }
+
+    #[test]
+    fn heap_size_is_zero_while_inline_and_the_buffer_after() {
+        let mut v = InlineVec::<u32, 4>::new();
+        assert_eq!(v.heap_size(), 0);
+        v.extend([1, 2, 3, 4]);
+        assert_eq!(v.heap_size(), 0);
+
+        v.push(5);
+        assert!(v.heap_size() >= 5 * size_of::<u32>());
+        assert_eq!(v.heap_size(), v.capacity() * size_of::<u32>());
+
+        // Unused capacity still counts.
+        v.clear();
+        assert_eq!(v.heap_size(), v.capacity() * size_of::<u32>());
+
+        let big = InlineVec::<u64, 2>::with_capacity(100);
+        assert_eq!(big.heap_size(), big.capacity() * size_of::<u64>());
+    }
+
+    #[test]
+    fn heap_size_ignores_zero_sized_elements() {
+        let mut v = InlineVec::<(), 1>::new();
+        v.extend([(), (), ()]);
+        assert_eq!(v.heap_size(), 0);
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! See [`AtomicRefCell`].
 
+use crate::heap_size::HeapSize;
 use core::cell::UnsafeCell;
 use core::error::Error;
 use core::fmt;
@@ -664,6 +665,14 @@ impl fmt::Display for BorrowMutError {
 
 impl Error for BorrowMutError {}
 
+/// The cell keeps its value inline and allocates nothing, so this is always
+/// `0`. What the value itself owns is not counted.
+impl<T: ?Sized> HeapSize for AtomicRefCell<T> {
+    fn heap_size(&self) -> usize {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,5 +1036,15 @@ mod tests {
         assert_eq!(Arc::strong_count(&value), 2);
         drop(cell);
         assert_eq!(Arc::strong_count(&value), 1);
+    }
+
+    #[test]
+    fn heap_size_is_zero() {
+        let cell = AtomicRefCell::new(Vec::from([1_u8; 100]));
+        assert_eq!(cell.heap_size(), 0);
+
+        // Whether the cell is borrowed does not matter.
+        let _guard = cell.borrow_mut();
+        assert_eq!(cell.heap_size(), 0);
     }
 }

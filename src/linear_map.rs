@@ -2,6 +2,7 @@
 //!
 //! See [`LinearMap`] for details and when to prefer it over `HashMap`.
 
+use crate::heap_size::HeapSize;
 use alloc::vec::{self, Vec};
 use core::borrow::Borrow;
 use core::fmt;
@@ -808,6 +809,14 @@ pub struct IntoValues<K, V> {
 forward_iterator!({K, V} IntoValues<K, V>, V, |(_, v)| v);
 debug_remaining!({K, V} IntoValues IntoValues<K, V>);
 
+/// Counts the buffer of key-value pairs, which is `0` for a map that has not
+/// allocated yet.
+impl<K, V> HeapSize for LinearMap<K, V> {
+    fn heap_size(&self) -> usize {
+        self.storage.capacity() * size_of::<(K, V)>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Test values are small and narrowed on purpose.
@@ -1605,5 +1614,19 @@ mod tests {
             drop(map);
             assert_eq!(live(&token), 0);
         }
+    }
+
+    #[test]
+    fn heap_size_is_the_buffer_of_pairs() {
+        let mut map = LinearMap::<u32, u64>::new();
+        assert_eq!(map.heap_size(), 0);
+
+        map.insert(1, 1);
+        assert_eq!(map.heap_size(), map.capacity() * size_of::<(u32, u64)>());
+        assert!(map.heap_size() >= size_of::<(u32, u64)>());
+
+        let reserved = LinearMap::<u32, u64>::with_capacity(100);
+        assert_eq!(reserved.heap_size(), reserved.capacity() * 16);
+        assert!(reserved.heap_size() >= 100 * 16);
     }
 }
