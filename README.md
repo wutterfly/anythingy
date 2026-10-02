@@ -13,6 +13,7 @@ Collections and containers with different space/time trade-offs than the ones in
 | `TokenStore` | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
 | `InlineVec` | A vector that keeps its first few elements inline and only allocates beyond that |
 | `LinearMap`, `LinearSet` | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
+| `InlineMap` | A hash map that keeps its first few entries inline, and only hashes once it outgrows them |
 | `ThingMap`, `SThingMap` | One value per type, looked up by the type (the second is `Send + Sync`) |
 | `EventQueue` | A multi-producer queue that is drained in batches |
 
@@ -44,7 +45,7 @@ assert_eq!(resources.get::<u32>(), Some(&42));
 
 ## Features
 
-The default `std` feature adds `ThingMap`, `SThingMap` and `EventQueue`. Everything else works with
+The default `std` feature adds `InlineMap`, `ThingMap`, `SThingMap` and `EventQueue`. Everything else works with
 only `core` and `alloc`:
 
 ```toml

@@ -1,6 +1,6 @@
 [package]
 name = "anythingy"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 rust-version = "1.88"
 description = "Collections with different space/time trade-offs: a type-erased Thing, a generational TokenStore, InlineVec, LinearMap and LinearSet, a type map and an event queue."
@@ -36,6 +36,11 @@ name = "linear_map"
 harness = false
 
 [[bench]]
+name = "inline_map"
+harness = false
+required-features = ["std"]
+
+[[bench]]
 name = "inline_vec"
 harness = false
 
@@ -63,6 +68,10 @@ harness = false
 
 [[example]]
 name = "event_queue"
+required-features = ["std"]
+
+[[example]]
+name = "inline_map"
 required-features = ["std"]
 
 [[example]]

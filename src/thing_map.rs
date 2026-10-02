@@ -7,46 +7,12 @@ use std::any::TypeId;
 use std::collections::hash_map;
 use std::collections::{HashMap, TryReserveError};
 use std::fmt;
-use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::hash::BuildHasher;
 use std::marker::PhantomData;
 
 use crate::thing::{DEFAULT_THING_SIZE, RawThing, Thing};
 
-/// A hasher for `TypeId` keys, and the default hasher of [`ThingMap`].
-///
-/// A `TypeId` is already a well-mixed hash of its type, so this hasher uses it
-/// as it is instead of hashing it again. It is meant for `TypeId` keys only.
-#[derive(Debug, Default, Clone)]
-pub struct TypeIdHasher(u64);
-
-impl Hasher for TypeIdHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        // A single write leaves exactly `value` (0 rotated is 0).
-        self.0 = self.0.rotate_left(5) ^ value;
-    }
-
-    #[inline]
-    #[allow(clippy::cast_possible_truncation)] // deliberate: the low half of the value
-    fn write_u128(&mut self, value: u128) {
-        self.write_u64(value as u64);
-        self.write_u64((value >> 64) as u64);
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.write_u64(u64::from(byte));
-        }
-    }
-}
-
-/// The `BuildHasher` [`ThingMap`] uses unless told otherwise.
-pub type TypeIdBuildHasher = BuildHasherDefault<TypeIdHasher>;
+pub use crate::type_id_hasher::{TypeIdBuildHasher, TypeIdHasher};
 
 /// A map that holds at most one value of each type, looked up by the type.
 ///
@@ -544,7 +510,6 @@ impl<const SIZE: usize, S> HeapSize for ThingMap<SIZE, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use std::collections::hash_map::RandomState;
     use std::rc::Rc;
 
@@ -970,57 +935,6 @@ mod tests {
             Entry::Vacant(_) => panic!(),
         }
         assert_eq!(live(&token), 0);
-    }
-
-    // ---- the hasher ----
-
-    #[test]
-    fn hasher_passes_a_single_write_through() {
-        let mut hasher = TypeIdHasher::default();
-        hasher.write_u64(0xDEAD_BEEF_1234_5678);
-        assert_eq!(hasher.finish(), 0xDEAD_BEEF_1234_5678);
-    }
-
-    #[test]
-    fn hasher_keeps_several_writes_distinct() {
-        let hash = |a: u64, b: u64| {
-            let mut hasher = TypeIdHasher::default();
-            hasher.write_u64(a);
-            hasher.write_u64(b);
-            hasher.finish()
-        };
-        assert_ne!(hash(1, 2), hash(2, 1));
-        assert_ne!(hash(1, 2), hash(1, 3));
-
-        let mut bytes = TypeIdHasher::default();
-        bytes.write(&[1, 2, 3]);
-        let mut other = TypeIdHasher::default();
-        other.write(&[3, 2, 1]);
-        assert_ne!(bytes.finish(), other.finish());
-
-        let mut wide = TypeIdHasher::default();
-        wide.write_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
-        assert_ne!(wide.finish(), 0);
-    }
-
-    #[test]
-    fn type_ids_hash_to_distinct_values_for_distinct_types() {
-        let build = TypeIdBuildHasher::default();
-        let hash_of = |id: TypeId| build.hash_one(id);
-
-        let ids = [
-            TypeId::of::<u8>(),
-            TypeId::of::<u16>(),
-            TypeId::of::<u32>(),
-            TypeId::of::<String>(),
-            TypeId::of::<Vec<u8>>(),
-            TypeId::of::<Config>(),
-            TypeId::of::<Counter>(),
-            TypeId::of::<Marker>(),
-        ];
-        let hashes: HashSet<u64> = ids.iter().map(|id| hash_of(*id)).collect();
-        assert_eq!(hashes.len(), ids.len());
-        assert_eq!(hash_of(ids[0]), hash_of(ids[0]));
     }
 
     #[test]

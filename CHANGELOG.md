@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5
+
+### Added
+
+- `InlineMap`: a hash map that keeps its first `N` entries inline, without allocating, and moves them into a `HashMap` when it grows past that. It has the API of `HashMap`, including `entry`, iterators and `HeapSize`, and needs the `std` feature.
+- `TypeIdHasher` and `TypeIdBuildHasher`: the cheap pass-through hasher for `TypeId` keys, now in a module of its own so that it can be used for any map keyed by `TypeId`, not just `ThingMap`. They work without `std`, and are still available from `thing_map`.
+
 ## 0.3.4
 
 ### Added

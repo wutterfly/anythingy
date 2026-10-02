@@ -9,7 +9,8 @@ use std::fmt;
 use std::hash::BuildHasher;
 
 use crate::thing::DEFAULT_THING_SIZE;
-use crate::thing_map::{Entry, ThingMap, TypeIdBuildHasher};
+use crate::thing_map::{Entry, ThingMap};
+use crate::type_id_hasher::TypeIdBuildHasher;
 
 /// A [`ThingMap`] that is `Send` and `Sync`.
 ///

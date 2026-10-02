@@ -11,6 +11,10 @@
 //! | [`LinearMap`], [`LinearSet`] | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
 #![cfg_attr(
     feature = "std",
+    doc = "| [`InlineMap`] | A hash map that keeps its first few entries inline, and only hashes once it outgrows them |"
+)]
+#![cfg_attr(
+    feature = "std",
     doc = "| [`ThingMap`], [`SThingMap`] | One value per type, looked up by the type (the second is thread-safe) |"
 )]
 #![cfg_attr(
@@ -18,14 +22,17 @@
     doc = "| [`EventQueue`] | A multi-producer queue that is drained in batches |"
 )]
 //!
+//! [`TypeIdHasher`] is a cheap hasher for any map that is keyed by `TypeId`.
+//!
 //! The [`HeapSize`] trait reports how many bytes of heap memory a structure has
 //! allocated, and is implemented by the types above.
 //!
 //! # Features and `no_std`
 //!
 //! The crate is `no_std`-compatible and only needs `alloc`. The default `std`
-//! feature adds the types that need the standard library (`ThingMap`,
-//! `SThingMap` and `EventQueue`, listed above only when it is enabled).
+//! feature adds the types that need the standard library (`InlineMap`,
+//! `ThingMap`, `SThingMap` and `EventQueue`, listed above only when it is
+//! enabled).
 //! To use the rest without `std`:
 //!
 //! ```toml
@@ -44,6 +51,8 @@ pub mod atomic_slot;
 #[cfg(feature = "std")]
 pub mod event_queue;
 pub mod heap_size;
+#[cfg(feature = "std")]
+pub mod inline_map;
 pub mod inline_vec;
 pub mod linear_map;
 pub mod linear_set;
@@ -54,12 +63,15 @@ pub mod thing;
 #[cfg(feature = "std")]
 pub mod thing_map;
 pub mod token_store;
+pub mod type_id_hasher;
 
 pub use atomic_ref_cell::AtomicRefCell;
 pub use atomic_slot::AtomicSlot;
 #[cfg(feature = "std")]
 pub use event_queue::EventQueue;
 pub use heap_size::HeapSize;
+#[cfg(feature = "std")]
+pub use inline_map::InlineMap;
 pub use inline_vec::InlineVec;
 pub use linear_map::LinearMap;
 pub use linear_set::LinearSet;
@@ -70,6 +82,7 @@ pub use thing::Thing;
 #[cfg(feature = "std")]
 pub use thing_map::ThingMap;
 pub use token_store::{Token, TokenStore};
+pub use type_id_hasher::{TypeIdBuildHasher, TypeIdHasher};
 
 // Compiles and runs the code in the README as a doctest, without adding it
 // to the crate documentation.
