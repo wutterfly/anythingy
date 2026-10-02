@@ -12,6 +12,7 @@ use std::{
     hash::{BuildHasher, Hash},
     iter::{FusedIterator, Zip},
     mem::{self, ManuallyDrop, MaybeUninit},
+    num::NonZeroUsize,
     ops::Index,
     ptr, slice,
 };
@@ -83,7 +84,7 @@ enum Repr<K, V, const N: usize, S> {
 // that the length was just read from.
 #[repr(C)]
 struct Inline<K, V, const N: usize, S> {
-    len: usize,
+    len: Len,
 
     /// Kept apart from the values, so that finding a key only reads keys, which are small, and not the (possibly
     /// large) values next to them.
@@ -92,6 +93,34 @@ struct Inline<K, V, const N: usize, S> {
 
     /// Only to be given to the hash map, if the map spills.
     hasher: ManuallyDrop<S>,
+}
+
+/// The number of entries of an [`Inline`], stored as one more than it is, which makes it a number that is never zero.
+///
+/// That is all it is for: the compiler can then use the value zero of this field to tell that a map spilled, and store
+/// both kinds of map in the same space, instead of adding a tag that tells them apart. That saves 8 bytes for most sizes
+/// of `N`.
+#[derive(Clone, Copy)]
+struct Len(NonZeroUsize);
+
+impl Len {
+    /// No entries.
+    const ZERO: Self = Self(NonZeroUsize::MIN);
+
+    /// A number of entries, which is the number of the entries that are in an array, so it is far below `usize::MAX`
+    /// in any map that can exist. If it was not, this panics, and does not produce a length that is wrong.
+    #[inline]
+    const fn new(len: usize) -> Self {
+        match NonZeroUsize::new(len.wrapping_add(1)) {
+            Some(stored) => Self(stored),
+            None => panic!("too many entries"),
+        }
+    }
+
+    #[inline]
+    const fn get(self) -> usize {
+        self.0.get() - 1
+    }
 }
 
 /// The smallest number of entries for which the keys are searched block by block. Below this, stopping at the first match
@@ -160,39 +189,52 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
     #[inline]
     const fn new(hasher: S) -> Self {
         Self {
-            len: 0,
+            len: Len::ZERO,
             keys: [const { MaybeUninit::uninit() }; N],
             values: [const { MaybeUninit::uninit() }; N],
             hasher: ManuallyDrop::new(hasher),
         }
     }
 
+    /// The number of entries.
+    #[inline]
+    const fn len(&self) -> usize {
+        self.len.get()
+    }
+
+    #[inline]
+    const fn set_len(&mut self, len: usize) {
+        self.len = Len::new(len);
+    }
+
     #[inline]
     const fn keys(&self) -> &[K] {
         // SAFETY: `keys[..len]` is initialized (see the invariants), and `MaybeUninit<K>` has the layout of `K`.
-        unsafe { slice::from_raw_parts(self.keys.as_ptr().cast::<K>(), self.len) }
+        unsafe { slice::from_raw_parts(self.keys.as_ptr().cast::<K>(), self.len()) }
     }
 
     #[inline]
     const fn values(&self) -> &[V] {
         // SAFETY: `values[..len]` is initialized (see the invariants), and `MaybeUninit<V>` has the layout of `V`.
-        unsafe { slice::from_raw_parts(self.values.as_ptr().cast::<V>(), self.len) }
+        unsafe { slice::from_raw_parts(self.values.as_ptr().cast::<V>(), self.len()) }
     }
 
     #[inline]
     const fn values_mut(&mut self) -> &mut [V] {
         // SAFETY: as in `values`, and `&mut self` makes this the only reference to them.
-        unsafe { slice::from_raw_parts_mut(self.values.as_mut_ptr().cast::<V>(), self.len) }
+        unsafe { slice::from_raw_parts_mut(self.values.as_mut_ptr().cast::<V>(), self.len()) }
     }
 
     /// The keys, and the values (which can be changed) at the same time.
     #[inline]
     const fn entries_mut(&mut self) -> (&[K], &mut [V]) {
+        let len = self.len();
+
         // SAFETY: as in `keys` and `values_mut`. They are different fields, so the two slices do not overlap.
         unsafe {
             (
-                slice::from_raw_parts(self.keys.as_ptr().cast::<K>(), self.len),
-                slice::from_raw_parts_mut(self.values.as_mut_ptr().cast::<V>(), self.len),
+                slice::from_raw_parts(self.keys.as_ptr().cast::<K>(), len),
+                slice::from_raw_parts_mut(self.values.as_mut_ptr().cast::<V>(), len),
             )
         }
     }
@@ -221,9 +263,9 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
     /// Adds an entry. The key must not be in the map yet, and there has to be room.
     #[inline]
     fn push(&mut self, key: K, value: V) -> &mut V {
-        debug_assert!(self.len < N, "there has to be room");
+        debug_assert!(self.len() < N, "there has to be room");
 
-        let i = self.len;
+        let i = self.len();
 
         // SAFETY: `i < N`, as the caller made sure there is room.
         let (key_slot, value_slot) = unsafe {
@@ -236,7 +278,7 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
         let value = value_slot.write(value);
 
         // Only now, so that an entry that is half written is never counted. Neither `write` can panic.
-        self.len = i + 1;
+        self.len = Len::new(i + 1);
 
         value
     }
@@ -244,9 +286,10 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
     /// Removes the entry at the index, and moves the last entry into its place.
     #[inline]
     fn remove_at(&mut self, index: usize) -> (K, V) {
-        assert!(index < self.len, "index out of bounds");
+        let len = self.len();
+        assert!(index < len, "index out of bounds");
 
-        let last = self.len - 1;
+        let last = len - 1;
         let keys = self.keys.as_mut_ptr().cast::<K>();
         let values = self.values.as_mut_ptr().cast::<V>();
 
@@ -262,7 +305,7 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
                 ptr::copy_nonoverlapping(values.add(last), values.add(index), 1);
             }
 
-            self.len = last;
+            self.set_len(last);
             entry
         }
     }
@@ -270,7 +313,8 @@ impl<K, V, const N: usize, S> Inline<K, V, N, S> {
     /// Drops all entries.
     fn clear(&mut self) {
         // set first, so that nothing is dropped twice if dropping an entry panics: the others are leaked then
-        let len = mem::replace(&mut self.len, 0);
+        let len = self.len();
+        self.set_len(0);
 
         // SAFETY: `keys[..len]` and `values[..len]` are initialized and owned (see the invariants), and nothing
         // looks at them again, since `len` is `0` now.
@@ -348,7 +392,7 @@ impl<K, V, const N: usize, S> InlineMap<K, V, N, S> {
     #[must_use]
     pub fn len(&self) -> usize {
         match &self.repr {
-            Repr::Inline(inline) => inline.len,
+            Repr::Inline(inline) => inline.len(),
             Repr::Heap(map) => map.len(),
         }
     }
@@ -456,7 +500,7 @@ impl<K, V, const N: usize, S> InlineMap<K, V, N, S> {
             Repr::Inline(inline) => {
                 let mut i = 0;
 
-                while i < inline.len {
+                while i < inline.len() {
                     let keep = {
                         let (keys, values) = inline.entries_mut();
                         f(&keys[i], &mut values[i])
@@ -511,7 +555,7 @@ impl<K: Eq + Hash, V, const N: usize, S: BuildHasher> InlineMap<K, V, N, S> {
             return;
         };
 
-        let len = inline.len;
+        let len = inline.len();
 
         // SAFETY: the hasher is moved to the hash map, and `inline` is never dropped (see below), so it is not
         // dropped twice. Nothing can panic between here and where `inline` is wrapped in `ManuallyDrop`.
@@ -542,7 +586,7 @@ impl<K: Eq + Hash, V, const N: usize, S: BuildHasher> InlineMap<K, V, N, S> {
     pub fn reserve(&mut self, additional: usize) {
         match &mut self.repr {
             Repr::Inline(inline) => {
-                let needed = inline.len.saturating_add(additional);
+                let needed = inline.len().saturating_add(additional);
 
                 if needed > N {
                     self.spill(needed);
@@ -638,7 +682,7 @@ impl<K: Eq + Hash, V, const N: usize, S: BuildHasher> InlineMap<K, V, N, S> {
                 return Some(mem::replace(old, value));
             }
 
-            if inline.len < N {
+            if inline.len() < N {
                 inline.push(key, value);
                 return None;
             }
@@ -680,7 +724,7 @@ impl<K: Eq + Hash, V, const N: usize, S: BuildHasher> InlineMap<K, V, N, S> {
         // written as one `match` on `&mut self.repr`.
         if let Repr::Inline(inline) = &self.repr {
             let position = inline.position(&key);
-            let has_room = inline.len < N;
+            let has_room = inline.len() < N;
 
             return match position {
                 Some(index) => {
@@ -1269,7 +1313,7 @@ impl<K, V, const N: usize, S> IntoIterator for InlineMap<K, V, N, S> {
                     keys,
                     values,
                     pos: 0,
-                    len: inline.len,
+                    len: inline.len(),
                 }))
             }
             Repr::Heap(map) => IntoIter(IntoIterRepr::Heap(map.into_iter())),
@@ -2424,5 +2468,31 @@ mod tests {
             assert_eq!(wide.get(&(u128::from(i) << 70)), Some(&i));
         }
         assert_eq!(wide.get(&1), None);
+    }
+
+    /// A map does not store a tag that tells whether it spilled. The length of the inline part is never zero (see
+    /// `Len`), so the compiler uses that value to mark a map that spilled. That makes the map exactly as big as its
+    /// inline part, when that is the bigger one of the two, and 8 bytes smaller than with a tag.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn the_spilled_state_takes_no_extra_space() {
+        use super::{Inline, Repr};
+        use std::collections::hash_map::RandomState;
+        use std::mem::size_of;
+
+        fn check<K, V, const N: usize>() {
+            let inline = size_of::<Inline<K, V, N, RandomState>>();
+            assert_eq!(size_of::<Repr<K, V, N, RandomState>>(), inline, "N = {N}");
+            assert_eq!(size_of::<InlineMap<K, V, N>>(), inline, "N = {N}");
+        }
+
+        check::<u32, u32, 4>();
+        check::<u32, u32, 8>();
+        check::<u64, u64, 2>();
+        check::<u64, u64, 4>();
+        check::<String, u64, 1>();
+        check::<String, u64, 4>();
+        check::<u128, u128, 1>();
+        check::<u8, u8, 16>();
     }
 }

@@ -7,6 +7,12 @@
 - `InlineMap`: a hash map that keeps its first `N` entries inline, without allocating, and moves them into a `HashMap` when it grows past that. It has the API of `HashMap`, including `entry`, iterators and `HeapSize`, and needs the `std` feature.
 - `TypeIdHasher` and `TypeIdBuildHasher`: the cheap pass-through hasher for `TypeId` keys, now in a module of its own so that it can be used for any map keyed by `TypeId`, not just `ThingMap`. They work without `std`, and are still available from `thing_map`.
 
+### Changed
+
+- `InlineVec` and `InlineMap` are 8 bytes smaller for most sizes of their inline part: they no longer store a tag that tells whether they spilled to the heap.
+- `InlineMap` searches big inline maps of small keys block by block, which makes a lookup that finds nothing up to a third faster once there are 16 or more entries.
+- `AtomicSlot` allocates once instead of twice, so creating and dropping one is about twice as fast. Each of its two cells has a cache line of its own, which is why `HeapSize` reports 128 bytes for it.
+
 ## 0.3.4
 
 ### Added

@@ -11,6 +11,7 @@ use core::hash::{Hash, Hasher};
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
+use core::num::NonZeroUsize;
 use core::ops::{Bound, Deref, DerefMut, RangeBounds};
 use core::ptr::{self, NonNull};
 use core::slice;
@@ -66,11 +67,39 @@ pub struct InlineVec<T, const N: usize> {
 /// For `Inline { len, buf }`: `len <= N`, and exactly `buf[..len]` are
 /// initialized and owned by the vector.
 enum Repr<T, const N: usize> {
-    Inline {
-        len: usize,
-        buf: [MaybeUninit<T>; N],
-    },
+    Inline { len: Len, buf: [MaybeUninit<T>; N] },
     Heap(Vec<T>),
+}
+
+/// The number of inline elements, stored as one more than it is, which makes it
+/// a number that is never zero.
+///
+/// That is all it is for: the compiler can then use the value zero of this
+/// field to tell that the elements are on the heap, and store both cases in the
+/// same space, instead of adding a tag that tells them apart. That saves 8 bytes
+/// when the inline elements take 32 bytes or more.
+#[derive(Clone, Copy)]
+struct Len(NonZeroUsize);
+
+impl Len {
+    /// No elements.
+    const ZERO: Self = Self(NonZeroUsize::MIN);
+
+    /// A number of elements that are in an array, so it is far below
+    /// `usize::MAX` in any vector that can exist. If it was not, this panics,
+    /// and does not produce a length that is wrong.
+    #[inline]
+    const fn new(len: usize) -> Self {
+        match NonZeroUsize::new(len.wrapping_add(1)) {
+            Some(stored) => Self(stored),
+            None => panic!("too many elements"),
+        }
+    }
+
+    #[inline]
+    const fn get(self) -> usize {
+        self.0.get() - 1
+    }
 }
 
 /// The capacity to ask for when spilling to make room for `needed` elements:
@@ -89,7 +118,7 @@ impl<T, const N: usize> InlineVec<T, N> {
     pub const fn new() -> Self {
         Self {
             repr: Repr::Inline {
-                len: 0,
+                len: Len::ZERO,
                 buf: [const { MaybeUninit::uninit() }; N],
             },
         }
@@ -129,7 +158,7 @@ impl<T, const N: usize> InlineVec<T, N> {
     #[inline]
     pub const fn len(&self) -> usize {
         match &self.repr {
-            Repr::Inline { len, .. } => *len,
+            Repr::Inline { len, .. } => len.get(),
             Repr::Heap(vec) => vec.len(),
         }
     }
@@ -147,7 +176,7 @@ impl<T, const N: usize> InlineVec<T, N> {
             Repr::Inline { len, buf } => {
                 // SAFETY: `buf[..len]` is initialized (type invariant), and
                 // `MaybeUninit<T>` has the same layout as `T`.
-                unsafe { slice::from_raw_parts(buf.as_ptr().cast::<T>(), *len) }
+                unsafe { slice::from_raw_parts(buf.as_ptr().cast::<T>(), len.get()) }
             }
             Repr::Heap(vec) => vec.as_slice(),
         }
@@ -159,7 +188,7 @@ impl<T, const N: usize> InlineVec<T, N> {
         match &mut self.repr {
             Repr::Inline { len, buf } => {
                 // SAFETY: as in `as_slice`.
-                unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<T>(), *len) }
+                unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<T>(), len.get()) }
             }
             Repr::Heap(vec) => vec.as_mut_slice(),
         }
@@ -196,7 +225,7 @@ impl<T, const N: usize> InlineVec<T, N> {
         match &mut self.repr {
             Repr::Inline { len, .. } => {
                 debug_assert!(new_len <= N);
-                *len = new_len;
+                *len = Len::new(new_len);
             }
             // SAFETY: the caller upholds `Vec::set_len`'s contract.
             Repr::Heap(vec) => unsafe { vec.set_len(new_len) },
@@ -210,7 +239,8 @@ impl<T, const N: usize> InlineVec<T, N> {
     fn spill(&mut self, min_capacity: usize) -> &mut Vec<T> {
         if let Repr::Inline { len, buf } = &mut self.repr {
             // Allocate first: if this panics, nothing has been touched.
-            let mut vec = Vec::with_capacity(min_capacity.max(*len));
+            let inline_len = len.get();
+            let mut vec = Vec::with_capacity(min_capacity.max(inline_len));
             // SAFETY: `buf[..len]` is initialized; `vec` has room for at
             // least `len` elements and is a separate allocation, so the
             // ranges do not overlap. Afterwards the elements are owned by
@@ -218,10 +248,10 @@ impl<T, const N: usize> InlineVec<T, N> {
             // which has no drop glue) is discarded below without dropping
             // them.
             unsafe {
-                ptr::copy_nonoverlapping(buf.as_ptr().cast::<T>(), vec.as_mut_ptr(), *len);
-                vec.set_len(*len);
+                ptr::copy_nonoverlapping(buf.as_ptr().cast::<T>(), vec.as_mut_ptr(), inline_len);
+                vec.set_len(inline_len);
             }
-            *len = 0;
+            *len = Len::ZERO;
             self.repr = Repr::Heap(vec);
         }
         match &mut self.repr {
@@ -279,7 +309,10 @@ impl<T, const N: usize> InlineVec<T, N> {
                     ptr::copy_nonoverlapping(vec.as_ptr(), buf.as_mut_ptr().cast::<T>(), len);
                     vec.set_len(0);
                 }
-                self.repr = Repr::Inline { len, buf };
+                self.repr = Repr::Inline {
+                    len: Len::new(len),
+                    buf,
+                };
             } else {
                 vec.shrink_to_fit();
             }
@@ -290,10 +323,10 @@ impl<T, const N: usize> InlineVec<T, N> {
     #[inline]
     pub fn push(&mut self, value: T) {
         if let Repr::Inline { len, buf } = &mut self.repr
-            && *len < N
+            && len.get() < N
         {
-            buf[*len] = MaybeUninit::new(value);
-            *len += 1;
+            buf[len.get()] = MaybeUninit::new(value);
+            *len = Len::new(len.get() + 1);
             return;
         }
         self.heap_vec(1).push(value);
@@ -304,14 +337,14 @@ impl<T, const N: usize> InlineVec<T, N> {
     pub fn pop(&mut self) -> Option<T> {
         match &mut self.repr {
             Repr::Inline { len, buf } => {
-                if *len == 0 {
+                if len.get() == 0 {
                     return None;
                 }
-                *len -= 1;
-                // SAFETY: `buf[*len]` was initialized (it was inside the old
+                *len = Len::new(len.get() - 1);
+                // SAFETY: `buf[len]` was initialized (it was inside the old
                 // length) and is now outside the length, so it is read
                 // exactly once.
-                Some(unsafe { buf[*len].assume_init_read() })
+                Some(unsafe { buf[len.get()].assume_init_read() })
             }
             Repr::Heap(vec) => vec.pop(),
         }
@@ -329,7 +362,7 @@ impl<T, const N: usize> InlineVec<T, N> {
             "insertion index (is {index}) should be <= len (is {len})"
         );
         if let Repr::Inline { len, buf } = &mut self.repr
-            && *len < N
+            && len.get() < N
         {
             let base = buf.as_mut_ptr().cast::<T>();
             // SAFETY: `index <= len < N`, so both the shifted range
@@ -338,10 +371,10 @@ impl<T, const N: usize> InlineVec<T, N> {
             // (`ptr::copy` handles the overlap) and the gap is then
             // written, so afterwards `[..len + 1]` is initialized.
             unsafe {
-                ptr::copy(base.add(index), base.add(index + 1), *len - index);
+                ptr::copy(base.add(index), base.add(index + 1), len.get() - index);
                 ptr::write(base.add(index), value);
             }
-            *len += 1;
+            *len = Len::new(len.get() + 1);
             return;
         }
         self.heap_vec(1).insert(index, value);
@@ -368,8 +401,8 @@ impl<T, const N: usize> InlineVec<T, N> {
                 // counted while moved out.
                 unsafe {
                     let value = ptr::read(base.add(index));
-                    ptr::copy(base.add(index + 1), base.add(index), *len - index - 1);
-                    *len -= 1;
+                    ptr::copy(base.add(index + 1), base.add(index), len.get() - index - 1);
+                    *len = Len::new(len.get() - 1);
                     value
                 }
             }
@@ -398,13 +431,13 @@ impl<T, const N: usize> InlineVec<T, N> {
     pub fn truncate(&mut self, new_len: usize) {
         match &mut self.repr {
             Repr::Inline { len, buf } => {
-                if new_len >= *len {
+                if new_len >= len.get() {
                     return;
                 }
-                let old_len = *len;
+                let old_len = len.get();
                 // Shrink first, so that if a destructor panics the elements
                 // are not dropped a second time.
-                *len = new_len;
+                *len = Len::new(new_len);
                 // SAFETY: `[new_len, old_len)` was initialized and is now
                 // outside the length, so it is dropped exactly once here.
                 unsafe {
@@ -486,15 +519,15 @@ impl<T, const N: usize> InlineVec<T, N> {
         match &mut self.repr {
             Repr::Heap(vec) => core::mem::take(vec),
             Repr::Inline { len, buf } => {
-                let mut vec = Vec::with_capacity(*len);
+                let mut vec = Vec::with_capacity(len.get());
                 // SAFETY: `buf[..len]` is initialized; `vec` has room for
                 // `len` elements. The length is then reset to 0 so that
                 // dropping `self` does not drop the moved elements.
                 unsafe {
-                    ptr::copy_nonoverlapping(buf.as_ptr().cast::<T>(), vec.as_mut_ptr(), *len);
-                    vec.set_len(*len);
+                    ptr::copy_nonoverlapping(buf.as_ptr().cast::<T>(), vec.as_mut_ptr(), len.get());
+                    vec.set_len(len.get());
                 }
-                *len = 0;
+                *len = Len::ZERO;
                 vec
             }
         }
@@ -565,7 +598,7 @@ impl<T, const N: usize> Drop for InlineVec<T, N> {
             unsafe {
                 ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
                     buf.as_mut_ptr().cast::<T>(),
-                    *len,
+                    len.get(),
                 ));
             }
         }
@@ -1981,5 +2014,35 @@ mod tests {
         let mut v = InlineVec::<(), 1>::new();
         v.extend([(), (), ()]);
         assert_eq!(v.heap_size(), 0);
+    }
+
+    /// A vector does not store a tag that tells whether it spilled: the length of
+    /// the inline elements is never zero (see `Len`), so the compiler uses that
+    /// value to mark a vector that spilled. When the inline elements are bigger
+    /// than a `Vec`, the vector is exactly as big as they are, with their length.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn the_spilled_state_takes_no_extra_space() {
+        use core::mem::{align_of, size_of};
+
+        fn check<T, const N: usize>() {
+            // The length, padded to the alignment of the elements, then the elements.
+            let header = align_of::<T>().max(8);
+            let inline = (header + N * size_of::<T>()).next_multiple_of(header);
+            assert!(
+                inline >= 32,
+                "only for elements that are bigger than a `Vec`"
+            );
+            assert_eq!(size_of::<InlineVec<T, N>>(), inline, "N = {N}");
+        }
+
+        check::<u8, 32>();
+        check::<u32, 8>();
+        check::<u32, 16>();
+        check::<u64, 4>();
+        check::<u64, 8>();
+        check::<String, 2>();
+        check::<String, 4>();
+        check::<u128, 2>();
     }
 }

@@ -153,5 +153,20 @@ fn bench_contended(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single_thread, bench_contended);
+/// Creating a slot and dropping it again.
+fn bench_create(c: &mut Criterion) {
+    let mut group = c.benchmark_group("create_drop");
+
+    group.bench_function("AtomicSlot", |b| {
+        b.iter(|| black_box(AtomicSlot::<u64>::new()));
+    });
+
+    group.bench_function("Mutex<Option>", |b| {
+        b.iter(|| black_box(Mutex::<Option<u64>>::new(None)));
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_single_thread, bench_contended, bench_create);
 criterion_main!(benches);

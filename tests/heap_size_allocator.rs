@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anythingy::{HeapSize, InlineVec, LinearMap, LinearSet, Thing, TokenStore};
+use anythingy::{AtomicSlot, HeapSize, InlineVec, LinearMap, LinearSet, Thing, TokenStore};
 #[cfg(feature = "std")]
 use anythingy::{SThingMap, ThingMap};
 
@@ -28,6 +28,9 @@ thread_local! {
     /// plain `Cell` with no destructor, so it is usable from inside the
     /// allocator at any time.
     static LIVE: Cell<isize> = const { Cell::new(0) };
+
+    /// How many times this thread has asked for memory.
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 struct Counting;
@@ -39,6 +42,7 @@ fn add(bytes: isize) {
 // SAFETY: forwards every call to the system allocator, and only counts.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.with(|count| count.set(count.get() + 1));
         add(layout.size() as isize);
         unsafe { System.alloc(layout) }
     }
@@ -59,6 +63,10 @@ static ALLOCATOR: Counting = Counting;
 
 fn live() -> isize {
     LIVE.with(Cell::get)
+}
+
+fn allocations() -> usize {
+    ALLOCATIONS.with(Cell::get)
 }
 
 /// A different type for every `N`, with a size of `N` words.
@@ -356,4 +364,26 @@ fn std_btree_collections_are_a_lower_bound() {
         let reported = scattered.heap_size();
         assert_lower_bound(before, reported);
     }
+}
+
+#[test]
+fn atomic_slot_allocates_once_and_never_again() {
+    let before = allocations();
+    let slot = AtomicSlot::<u64>::new();
+    assert_eq!(allocations() - before, 1, "both cells are one allocation");
+
+    slot.push(1);
+    slot.push(2);
+    assert_eq!(slot.take(), Some(2));
+    assert_eq!(slot.take(), None);
+    assert_eq!(
+        allocations() - before,
+        1,
+        "pushing and taking do not allocate"
+    );
+
+    let live_before = live();
+    let boxed = AtomicSlot::<Box<[u64; 4]>>::new();
+    let reported = boxed.heap_size();
+    assert_matches(live_before, reported);
 }

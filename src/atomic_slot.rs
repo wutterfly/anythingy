@@ -11,33 +11,46 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 // Implementation notes
 // ----------------------
 //
-// The slot owns exactly two `Box<Option<T>>` allocations, made once in `new`
-// and freed only in `Drop`. `value` and `spare` each always point at one of
-// them, except briefly while a thread is in the middle of `set`. `value`
-// holds the current content (`None` = empty); `spare` always holds `None`
-// and stands by to become the next `value`.
+// The slot owns one allocation: an array of two `Cell<T>`, made once in `new`
+// and freed only in `Drop`, so creating a slot allocates once. Each cell is
+// aligned to a cache line (see `Cell`): the cells sit next to each other in
+// memory but not in the same line, which keeps threads that work on different
+// cells from moving one line between their cores. Packing both into one line
+// was measured, and made contended pushes slower. `value` and `spare` each
+// always point at one of the cells, except briefly while a thread is in the
+// middle of `set`. `value` holds the current content (`None` =
+// empty); `spare` always holds `None` and stands by to become the next `value`.
 //
 // `set`, which both `push` and `take` are built from, does the same steps
 // either way: grab `spare` (atomic swap to null), write the new content into
-// it, swap it into `value` (which gives the previous box back), read the
-// previous content out of that box, and hand the box back to `spare`, where
-// it holds `None` again like every box does whenever it sits there.
+// it, swap it into `value` (which gives the previous cell back), read the
+// previous content out of that cell, and hand the cell back to `spare`, where
+// it holds `None` again like every cell does whenever it sits there.
 //
 // Grabbing `spare` can find it null, because another thread is between its
-// own grab and hand-back. This spins instead of allocating a third box. That
-// is sound because there are only two boxes, and every `set` that takes
+// own grab and hand-back. This spins instead of looking for a third cell. That
+// is sound because there are only two cells, and every `set` that takes
 // `spare` puts one back before returning, with no path out that skips it.
 // Not even a panicking `T::drop` can: nothing in `set` drops a live `T`. The
-// box grabbed from `spare` held `None`, so overwriting it drops nothing, and
-// the value read out of `value`'s old box is returned to the caller, who
-// drops it after `set` has already handed the box back.
+// cell grabbed from `spare` held `None`, so overwriting it drops nothing, and
+// the value read out of `value`'s old cell is returned to the caller, who
+// drops it after `set` has already handed the cell back.
 //
 // A plain `AtomicCell<Option<T>>` would move the value through an integer
 // atomic, which cannot carry pointer provenance, so Miri flags the drop of
 // the overwritten value for pointer-shaped `T` (`Box`, `Arc`, `&'static X`).
-// This slot only ever moves real, typed `Box<Option<T>>` pointers.
+// This slot only ever moves real, typed `*mut Option<T>` pointers, which are
+// derived from the pointer to the allocation.
 //
 // The slot does not track whether it is empty beyond what `Option<T>` says.
+
+/// One cell of an [`AtomicSlot`], aligned to a cache line.
+///
+/// Threads work on the two cells of a slot at the same time. If both were in one
+/// cache line, the line would have to move between the cores on every
+/// operation, so each cell gets a line of its own.
+#[repr(align(64))]
+struct Cell<T>(Option<T>);
 
 /// A slot that holds zero or one value of `T`, which any number of threads can
 /// fill and empty through a shared reference.
@@ -117,13 +130,23 @@ unsafe impl<T: Send> Sync for AtomicSlot<T> {}
 impl<T> AtomicSlot<T> {
     /// Creates an empty slot.
     ///
-    /// This is the only call that allocates.
+    /// This is the only call that allocates, and it allocates once.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
+        let cells: Box<[Cell<T>; 2]> = Box::new([Cell(None), Cell(None)]);
+        let cells = Box::into_raw(cells).cast::<Cell<T>>();
+
+        // The option is the only field of a cell, so it is at its start.
+        let first = cells.cast::<Option<T>>();
+
+        // SAFETY: the allocation is an array of two cells, so the second one is
+        // inside it.
+        let second = unsafe { cells.add(1) }.cast::<Option<T>>();
+
         Self {
-            value: AtomicPtr::new(Box::into_raw(Box::new(None))),
-            spare: AtomicPtr::new(Box::into_raw(Box::new(None))),
+            value: AtomicPtr::new(first),
+            spare: AtomicPtr::new(second),
             _marker: PhantomData,
         }
     }
@@ -146,14 +169,14 @@ impl<T> AtomicSlot<T> {
             // Wait with plain loads until `spare` is back, and only then try
             // the swap again. Swapping in a loop would write to the cache line
             // on every spin, and the waiting threads would keep pulling it
-            // away from the thread that is about to hand the box back.
+            // away from the thread that is about to hand the cell back.
             while self.spare.load(Ordering::Relaxed).is_null() {
                 core::hint::spin_loop();
             }
         };
 
-        // SAFETY: `raw` points at one of the two boxes allocated in `new`,
-        // which are never freed before `Drop`. As a box that was just in
+        // SAFETY: `raw` points at one of the two cells allocated in `new`,
+        // which are never freed before `Drop`. As a cell that was just in
         // `spare` it holds `None`, so this assignment drops a `None`, never a
         // live `T`.
         unsafe { *raw = new };
@@ -166,9 +189,9 @@ impl<T> AtomicSlot<T> {
         // so this has to happen first.
         let previous = unsafe { (*old).take() };
 
-        // `old` now holds `None`, like every box in `spare` does. A plain
+        // `old` now holds `None`, like every cell in `spare` does. A plain
         // store, not a swap or a CAS, is correct: `spare` is still null,
-        // since the only way to put a box there is to hold `spare`'s one box,
+        // since the only way to put a cell there is to hold `spare`'s one cell,
         // and this thread holds it, in `old`.
         self.spare.store(old, Ordering::Release);
 
@@ -195,7 +218,7 @@ impl<T> AtomicSlot<T> {
     /// at the same time.
     #[inline]
     pub fn clear(&mut self) {
-        // SAFETY: `value` points at one of the two boxes allocated in `new`,
+        // SAFETY: `value` points at one of the two cells allocated in `new`,
         // which are never freed before `Drop`. Exclusive access (`&mut self`)
         // means no atomic operation is needed to touch it.
         unsafe { *(*self.value.get_mut()) = None };
@@ -220,25 +243,31 @@ impl<T> fmt::Debug for AtomicSlot<T> {
 impl<T> Drop for AtomicSlot<T> {
     #[inline]
     fn drop(&mut self) {
-        // SAFETY: both `value` and `spare` point at one of the two boxes
-        // allocated in `new`, and nothing else frees them. Exclusive access
-        // (`&mut self`) means no atomic operation is needed to take them back.
-        drop(unsafe { Box::from_raw(*self.value.get_mut()) });
-        drop(unsafe { Box::from_raw(*self.spare.get_mut()) });
+        let value = *self.value.get_mut();
+        let spare = *self.spare.get_mut();
+
+        // The cells are the two elements of one array, and the pointer to the
+        // array is the one to its first element, which is the lower of the two.
+        let array = value.min(spare).cast::<[Cell<T>; 2]>();
+
+        // SAFETY: `value` and `spare` point at the two cells of the array that
+        // `new` allocated, and nothing else frees it. Exclusive access
+        // (`&mut self`) means no atomic operation is needed to take it back.
+        drop(unsafe { Box::from_raw(array) });
     }
 }
 
-/// Counts the two boxes that the slot allocates in [`AtomicSlot::new`], which
-/// is all it ever allocates, whatever it holds.
+/// Counts the allocation of the two cells that the slot makes in
+/// [`AtomicSlot::new`], which is all it ever allocates, whatever it holds.
 impl<T> HeapSize for AtomicSlot<T> {
     fn heap_size(&self) -> usize {
-        2 * size_of::<Option<T>>()
+        size_of::<[Cell<T>; 2]>()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AtomicSlot;
+    use super::{AtomicSlot, Cell};
     use crate::heap_size::HeapSize;
 
     #[test]
@@ -320,7 +349,7 @@ mod tests {
         // regression test for the claim in `AtomicSlot`'s docs: `set` never drops a live `T` itself, only ever
         // handing the evicted value back to its caller — so even a panicking `Drop`, which only ever runs in
         // that caller (here, `push`'s `drop(self.set(..))`, after `set` has already returned) cannot leave
-        // `spare` without a box in it and stall every future `push`/`take` on this slot.
+        // `spare` without a cell in it and stall every future `push`/`take` on this slot.
         struct MaybeDropPanics(bool);
 
         impl Drop for MaybeDropPanics {
@@ -340,27 +369,27 @@ mod tests {
         }));
         assert!(panicked.is_err());
 
-        // the slot must still be fully usable: `spare` was never left without a box to give back
+        // the slot must still be fully usable: `spare` was never left without a cell to give back
         slot.push(MaybeDropPanics(false));
         assert!(slot.take().is_some());
     }
 
     #[test]
-    fn heap_size_is_the_two_boxes_whatever_the_content() {
+    fn heap_size_is_the_two_cells_whatever_the_content() {
         let slot = AtomicSlot::<u64>::new();
-        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+        assert_eq!(slot.heap_size(), size_of::<[Cell<u64>; 2]>());
 
         slot.push(1);
-        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+        assert_eq!(slot.heap_size(), size_of::<[Cell<u64>; 2]>());
         let _ = slot.take();
-        assert_eq!(slot.heap_size(), 2 * size_of::<Option<u64>>());
+        assert_eq!(slot.heap_size(), size_of::<[Cell<u64>; 2]>());
 
         // What the value owns is not counted.
         let strings = AtomicSlot::new();
         strings.push(alloc::string::String::from("a long enough text"));
         assert_eq!(
             strings.heap_size(),
-            2 * size_of::<Option<alloc::string::String>>()
+            size_of::<[Cell<alloc::string::String>; 2]>()
         );
     }
 }
