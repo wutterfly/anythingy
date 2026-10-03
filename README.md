@@ -5,17 +5,17 @@
 Collections and containers with different space/time trade-offs than the ones in `std::collections`.
 `no_std` compatible (needs `alloc`). Pre-1.0: the API may change between minor versions.
 
-| Type | What it is |
-|---|---|
-| `Thing`, `SThing` | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is `Send + Sync`) |
-| `AtomicRefCell` | A `RefCell` that can be shared between threads, with borrows checked at runtime and never waited for |
-| `AtomicSlot` | A single-value mailbox shared between threads, where the latest value replaces the previous one |
-| `TokenStore` | Values addressed by small `Copy` tokens that detect stale use (a generational index) |
-| `InlineVec` | A vector that keeps its first few elements inline and only allocates beyond that |
-| `LinearMap`, `LinearSet` | A map and a set in a flat vector, for small sizes and keys that are only `Eq` |
-| `InlineMap` | A hash map that keeps its first few entries inline, and only hashes once it outgrows them |
-| `ThingMap`, `SThingMap` | One value per type, looked up by the type (the second is `Send + Sync`) |
-| `EventQueue` | A multi-producer queue that is drained in batches |
+| Type                     | What it is                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `Thing`, `SThing`        | A type-erased value, like `Box<dyn Any>`, that stores small values inline (the second is `Send + Sync`) |
+| `AtomicRefCell`          | A `RefCell` that can be shared between threads, with borrows checked at runtime and never waited for    |
+| `AtomicSlot`             | A single-value mailbox shared between threads, where the latest value replaces the previous one         |
+| `TokenStore`             | Values addressed by small `Copy` tokens that detect stale use (a generational index)                    |
+| `InlineVec`              | A vector that keeps its first few elements inline and only allocates beyond that                        |
+| `LinearMap`, `LinearSet` | A map and a set in a flat vector, for small sizes and keys that are only `Eq`                           |
+| `InlineMap`              | A hash map that keeps its first few entries inline, and only hashes once it outgrows them               |
+| `ThingMap`, `SThingMap`  | One value per type, looked up by the type (the second is `Send + Sync`)                                 |
+| `EventQueue`             | A multi-producer queue that is drained in batches                                                       |
 
 ## Example
 
@@ -56,4 +56,4 @@ Requires Rust 1.88 or newer.
 
 ## Licence
 
-This project is licensed under the [MIT license](./LICENCE).
+This project is licensed under the [MIT license](./LICENSE).
