@@ -656,7 +656,9 @@ mod tests {
             (state >> 33) % bound
         };
 
-        for _ in 0..4000 {
+        // Miri is slow, and this checks every byte on every step.
+        let steps = if cfg!(miri) { 150 } else { 4000 };
+        for _ in 0..steps {
             if live.is_empty() || next(100) < 50 {
                 let size = 1 + next(12);
                 let alignment = 1 << next(4);
@@ -977,7 +979,9 @@ mod tests {
             (state >> 33) % bound
         };
 
-        for _ in 0..5000 {
+        // Miri is slow, and this checks every byte on every step.
+        let steps = if cfg!(miri) { 300 } else { 5000 };
+        for _ in 0..steps {
             if live.is_empty() || next(100) < 55 {
                 let size = 1 + next(200);
                 let alignment = 1 << next(7); // 1 to 64
