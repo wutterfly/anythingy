@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6
+
+### Added
+
+- `FreeList`: the bookkeeping for handing out parts of one block of memory, such as a GPU allocation. `allocate` takes the smallest free range that fits (best fit) at the alignment asked for, `free` gives a range back and merges it with free neighbours, and a double free panics instead of handing out the same bytes twice. It counts in `u64` by default, or any of `u16`, `u32`, `u128` and `usize` (`FreeList<usize>`), knows nothing about what the memory is, works without `std`, and implements `HeapSize`. It keeps a few free ranges in a flat vector, and moves to two indexes (by offset and by size) when the block is fragmented into more than 64, so `allocate` and `free` stay fast either way.
+
 ## 0.3.5
 
 ### Added
