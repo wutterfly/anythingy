@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.7
+
+### Added
+
+- `bit_flags!`: a macro that defines a set of flags, a struct around an unsigned integer with one bit for each flag. It makes the constants, `contains`, `insert`, `remove`, `toggle`, `from_bits`, iteration in declaration order, the operators `|`, `&`, `^`, `-` and `!`, and `Debug` that prints the names, and works without `std`.
+
 ## 0.3.6
 
 ### Added
